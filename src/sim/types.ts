@@ -72,7 +72,7 @@ export interface World {
   heat?: number
 }
 
-/** Things that happened during one tick, for the discovery system. */
+/** Things that happened during one tick (eaten, born, moved…), for stats and tuning. */
 export interface TickEvents {
   eaten: number
   born: number

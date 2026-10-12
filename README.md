@@ -27,8 +27,7 @@ pnpm dev
 | `src/sim/project.ts` | Project file export and validated import |
 | `src/render/` | Renderer-agnostic atom artwork and board geometry (shared by the GPU field and SVG icons) |
 | `src/gpu/FieldRenderer.ts` | PixiJS v8 field renderer (WebGPU, falls back to WebGL), atlas-baked sprites |
-| `src/game/progress.ts` | Discoveries, XP and levels |
-| `src/components/` | React UI: palette, inspector, top bar, Codex |
+| `src/components/` | React UI: palette, inspector, top bar, toasts |
 
 ## Deploy
 

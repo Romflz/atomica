@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState } from 'react'
-import type { ReactNode } from 'react'
 import { MAX_SIZE, MIN_SIZE, SCENES, SIZE_PRESETS } from '../sim/demos'
 import type { Size } from '../sim/demos'
 
@@ -22,7 +21,6 @@ interface Props {
   size: Size
   backend: string
   preferWebGL: boolean
-  levelBadge: ReactNode
   onToggleRun: () => void
   onStep: () => void
   onTps: (tps: number) => void
@@ -99,7 +97,6 @@ export function TopBar(p: Props) {
         </button>
       </div>
 
-      <div className="topbar-end">{p.levelBadge}</div>
     </header>
   )
 }

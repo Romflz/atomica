@@ -1,25 +1,22 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { PointerEvent as ReactPointerEvent } from 'react'
 import { AtomIcon } from './components/AtomView'
-import { Codex, LevelBadge, Toasts } from './components/Game'
-import type { Toast } from './components/Game'
 import { GpuField } from './components/GpuField'
 import type { RendererInfo } from './components/GpuField'
 import { Inspector } from './components/Inspector'
 import { Palette } from './components/Palette'
+import { Toasts } from './components/Toasts'
+import type { Toast } from './components/Toasts'
 import { StatsHud, TopBar } from './components/TopBar'
-import { addEvents, evaluate, freshProgress, levelOf, meterFor } from './game/progress'
-import type { Discovery, Progress } from './game/progress'
 import type { FieldScene, Ghost, View } from './gpu/FieldRenderer'
 import { boardSize, pixelToCell, sizeAt } from './render/geometry'
 import { DEFS, makeAtom } from './sim/atoms'
 import { MAX_SIZE, MIN_SIZE, primordialSoup, SCENES } from './sim/demos'
 import type { Note, Size } from './sim/demos'
-import { buildGraph, cellKey, emptyEvents, step } from './sim/engine'
+import { buildGraph, cellKey, step } from './sim/engine'
 import { delta, translate, turnDelta } from './sim/hex'
 import { exportProject, importProject, MAX_PROJECT_BYTES, ProjectError } from './sim/project'
-import type { Origin, Project } from './sim/project'
-import type { Graph } from './sim/engine'
+import type { Project } from './sim/project'
 import type { Atom, AtomKind, World } from './sim/types'
 import './App.css'
 
@@ -47,10 +44,8 @@ type Gesture =
 
 // Square-grid saves (v2) don't fit the hex grid, so hex worlds save under a new key.
 const SAVE_KEY = 'atomforge.hex.v1'
-const PROGRESS_KEY = 'atomforge.progress.v1'
 const RENDERER_KEY = 'atomforge.renderer'
 const START_SCENE = 'foodchain'
-const SANDBOX_SCENES = new Set(['empty', 'soup'])
 
 function readJSON<T>(key: string): T | null {
   try {
@@ -73,23 +68,15 @@ interface Saved {
   world: World
   notes: Note[]
   sceneId: string
-  origin: Origin
 }
 
 function initial(): Saved {
   const saved = readJSON<Saved>(SAVE_KEY)
   if (saved?.world && Array.isArray(saved.world.atoms) && saved.world.atoms.every((a) => a.kind in DEFS) && saved.world.atoms.length) {
-    return { world: saved.world, notes: saved.notes ?? [], sceneId: 'custom', origin: saved.origin ?? 'sandbox' }
+    return { world: saved.world, notes: saved.notes ?? [], sceneId: 'custom' }
   }
   const scene = SCENES.find((s) => s.id === START_SCENE)!.make({ cols: 48, rows: 34 })
-  return { ...scene, sceneId: START_SCENE, origin: 'preset' }
-}
-
-function initialProgress(): Progress {
-  const p = readJSON<Progress>(PROGRESS_KEY)
-  if (!p || typeof p.xp !== 'number') return freshProgress()
-  const fresh = freshProgress()
-  return { ...fresh, ...p, totals: { ...fresh.totals, ...p.totals } }
+  return { ...scene, sceneId: START_SCENE }
 }
 
 /** Where a dragged set of atoms would land, and whether every cell is free. */
@@ -106,16 +93,11 @@ function placement(world: World, drag: DragState): Ghost | null {
   return { cells, valid }
 }
 
-/** Clasps currently holding something with a grip. */
-const grippingClasps = (g: Graph) =>
-  new Set([...g.byId.values()].filter((a) => a.kind === 'clasp' && (g.links.get(a.id) ?? []).some((l) => l.mine === 'grip')).map((a) => a.id))
-
 export default function App() {
   const [boot] = useState(initial)
   const [world, setWorldState] = useState<World>(boot.world)
   const [notes, setNotes] = useState<Note[]>(boot.notes)
   const [sceneId, setSceneId] = useState(boot.sceneId)
-  const [origin, setOrigin] = useState<Origin>(boot.origin)
   const [running, setRunning] = useState(true)
   const [tps, setTps] = useState(8)
   const [showFields, setShowFields] = useState(true)
@@ -125,9 +107,7 @@ export default function App() {
   const [resizePreview, setResizePreview] = useState<Size | null>(null)
   const [preferWebGL, setPreferWebGL] = useState(() => readJSON<boolean>(RENDERER_KEY) ?? false)
   const [info, setInfo] = useState<RendererInfo>({ backend: '…', fps: 0 })
-  const [progress, setProgressState] = useState<Progress>(initialProgress)
   const [toasts, setToasts] = useState<Toast[]>([])
-  const [codexOpen, setCodexOpen] = useState(false)
   const [fileDrag, setFileDrag] = useState(false)
 
   const hostRef = useRef<HTMLDivElement>(null)
@@ -139,10 +119,6 @@ export default function App() {
   const dragRef = useRef(drag)
   const selectedRef = useRef(selectedId)
   const resizeRef = useRef(resizePreview)
-  const progressRef = useRef(progress)
-  const originRef = useRef(origin)
-  const rendered = useRef<{ world: World; graph: Graph } | null>(null)
-  const pendingEvents = useRef(emptyEvents())
 
   const graph = useMemo(() => buildGraph(world), [world])
   const selected = selectedId ? (graph.byId.get(selectedId) ?? null) : null
@@ -152,8 +128,6 @@ export default function App() {
     dragRef.current = drag
     selectedRef.current = selectedId
     resizeRef.current = resizePreview
-    originRef.current = origin
-    rendered.current = { world, graph }
   })
 
   /**
@@ -174,65 +148,19 @@ export default function App() {
     const interval = 1000 / tps
     const loop = () => {
       const t0 = performance.now()
-      commit((w) => step(w, pendingEvents.current))
+      commit(step)
       handle = window.setTimeout(loop, Math.max(0, interval - (performance.now() - t0)))
     }
     handle = window.setTimeout(loop, interval)
     return () => window.clearTimeout(handle)
   }, [running, tps, commit])
 
-  // ── Progress: fold events in and look for new discoveries ─────────
+  // ── Toasts ────────────────────────────────────────────────────────
   const pushToast = useCallback((t: Omit<Toast, 'id'>) => {
     const id = Math.random()
     setToasts((list) => [...list.slice(-3), { ...t, id }])
     window.setTimeout(() => setToasts((list) => list.filter((x) => x.id !== id)), 4800)
   }, [])
-
-  const updateProgress = useCallback(
-    (fn: (p: Progress) => Progress) => {
-      const before = progressRef.current
-      let next = fn(before)
-      const r = rendered.current
-      const found: Discovery[] = r ? evaluate(next, { world: r.world, graph: r.graph, sandbox: originRef.current === 'sandbox' }) : []
-      if (found.length) {
-        const unlocked = { ...next.unlocked }
-        found.forEach((d) => (unlocked[d.id] = Date.now()))
-        next = { ...next, unlocked, xp: next.xp + found.reduce((s, d) => s + d.xp, 0) }
-      }
-      if (next === before) return
-      progressRef.current = next
-      setProgressState(next)
-      found.forEach((d) => pushToast({ kind: 'discovery', title: d.name, detail: `${d.desc} +${d.xp} XP`, icon: d.icon }))
-      const lv0 = levelOf(before.xp)
-      const lv1 = levelOf(next.xp)
-      if (lv1.level > lv0.level) pushToast({ kind: 'level', title: `Level ${lv1.level} · ${lv1.title}`, detail: 'New rank unlocked', icon: 'pulsar' })
-    },
-    [pushToast],
-  )
-
-  const lastGrip = useRef(new Set<string>())
-  useEffect(() => {
-    const id = window.setInterval(() => {
-      const r = rendered.current
-      if (!r) return
-      const ev = pendingEvents.current
-      pendingEvents.current = emptyEvents()
-      const grips = grippingClasps(r.graph)
-      let splits = 0
-      for (const cid of lastGrip.current) if (r.graph.byId.get(cid)?.out) splits++
-      lastGrip.current = grips
-      const sandbox = originRef.current === 'sandbox'
-      updateProgress((p) => {
-        if (!sandbox) return p
-        const totals = addEvents(p.totals, ev)
-        if (totals === p.totals && !splits) return p
-        return { ...p, totals: splits ? { ...totals, splits: totals.splits + splits } : totals }
-      })
-    }, 400)
-    return () => window.clearInterval(id)
-  }, [updateProgress])
-
-  useEffect(() => writeJSON(PROGRESS_KEY, progress), [progress])
 
   // ── Autosave (throttled; a running sim changes the world every tick) ──
   useEffect(() => {
@@ -240,7 +168,7 @@ export default function App() {
     const id = window.setInterval(() => {
       if (worldRef.current === last) return
       last = worldRef.current
-      writeJSON(SAVE_KEY, { world: last, notes, sceneId, origin: originRef.current })
+      writeJSON(SAVE_KEY, { world: last, notes, sceneId })
     }, 2000)
     return () => window.clearInterval(id)
   }, [notes, sceneId])
@@ -339,10 +267,9 @@ export default function App() {
       const cols = Math.max(MIN_SIZE.cols, Math.min(MAX_SIZE.cols, size.cols))
       const rows = Math.max(MIN_SIZE.rows, Math.min(MAX_SIZE.rows, size.rows))
       commit((w) => (w.cols === cols && w.rows === rows ? w : { ...w, cols, rows, atoms: w.atoms.filter((a) => a.x < cols && a.y < rows) }))
-      updateProgress((p) => (cols * rows > p.maxArea ? { ...p, maxArea: cols * rows } : p))
       if (refit) requestAnimationFrame(fit)
     },
-    [commit, fit, updateProgress],
+    [commit, fit],
   )
 
   const loadScene = useCallback(
@@ -353,21 +280,15 @@ export default function App() {
       commit(() => made.world)
       setNotes(made.notes)
       setSceneId(scene.id)
-      const o: Origin = SANDBOX_SCENES.has(scene.id) ? 'sandbox' : 'preset'
-      setOrigin(o)
-      originRef.current = o
       setSelectedId(null)
-      lastGrip.current = new Set()
-      pendingEvents.current = emptyEvents()
-      if (!SANDBOX_SCENES.has(scene.id)) updateProgress((p) => (p.presets.includes(scene.id) ? p : { ...p, presets: [...p.presets, scene.id] }))
       requestAnimationFrame(fit)
     },
-    [commit, fit, updateProgress],
+    [commit, fit],
   )
 
   // ── Project files ─────────────────────────────────────────────────
   const exportFile = () => {
-    const text = exportProject({ world: worldRef.current, notes, origin: originRef.current })
+    const text = exportProject({ world: worldRef.current, notes })
     const d = new Date()
     const pad = (n: number) => String(n).padStart(2, '0')
     const stamp = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}`
@@ -382,19 +303,14 @@ export default function App() {
   }
 
   const openProject = useCallback(
-    ({ world: w, notes: n, origin: o }: Project) => {
+    ({ world: w, notes: n }: Project) => {
       commit(() => w)
       setNotes(n)
       setSceneId('custom')
-      setOrigin(o)
-      originRef.current = o
       setSelectedId(null)
-      lastGrip.current = new Set()
-      pendingEvents.current = emptyEvents()
-      updateProgress((p) => (w.cols * w.rows > p.maxArea ? { ...p, maxArea: w.cols * w.rows } : p))
       requestAnimationFrame(fit)
     },
-    [commit, fit, updateProgress],
+    [commit, fit],
   )
 
   const importFile = useCallback(
@@ -486,7 +402,6 @@ export default function App() {
       const placed = ghost.cells.map((c) => ({ ...c.atom, x: c.x, y: c.y }))
       commit((cur) => ({ ...cur, atoms: [...cur.atoms, ...placed] }))
       setSelectedId(placed[0].id)
-      if (d.from === 'palette') updateProgress((p) => ({ ...p, totals: { ...p.totals, placed: p.totals.placed + 1 } }))
       return
     }
     if (d.from === 'field' && ghost) {
@@ -585,13 +500,12 @@ export default function App() {
         }
         return
       }
-      if (codexOpen && k !== 'c') return
       const sel = selectedRef.current
       if (k === ' ') {
         e.preventDefault()
         setRunning((r) => !r)
       } else if (k === '.' || k === 'n') {
-        commit((w) => step(w, pendingEvents.current))
+        commit(step)
       } else if (k === 'r') {
         if (dragRef.current) rotateDrag()
         else if (sel) rotateAtom(sel)
@@ -604,8 +518,6 @@ export default function App() {
         fit()
       } else if (k === 'v') {
         setShowFields((v) => !v)
-      } else if (k === 'c') {
-        setCodexOpen((o) => !o)
       } else if (k === 'escape') {
         if (dragRef.current) cancelDrag()
         else setSelectedId(null)
@@ -651,8 +563,6 @@ export default function App() {
     return { tick: world.tick, atoms: world.atoms.length, bonds: graph.bonds.length, molecules, largest, charged }
   }, [graph, world])
 
-  const meter = (d: Discovery) => meterFor(d, progress, { world, graph, sandbox: origin === 'sandbox' })
-
   return (
     <div className={`app${drag ? ' is-dragging' : ''}`}>
       <div className="backdrop" aria-hidden />
@@ -665,9 +575,8 @@ export default function App() {
         size={{ cols: world.cols, rows: world.rows }}
         backend={info.backend}
         preferWebGL={preferWebGL}
-        levelBadge={<LevelBadge xp={progress.xp} onOpen={() => setCodexOpen(true)} />}
         onToggleRun={() => setRunning((r) => !r)}
-        onStep={() => commit((w) => step(w, pendingEvents.current))}
+        onStep={() => commit(step)}
         onTps={setTps}
         onHeat={(heat) => commit((w) => ({ ...w, heat }))}
         onToggleFields={() => setShowFields((v) => !v)}
@@ -708,7 +617,6 @@ export default function App() {
           />
           <div className={`stage-status${running ? ' live' : ''}`}>
             <i /> {running ? 'SIMULATING' : 'PAUSED'}
-            {origin === 'preset' && <em>PRESET</em>}
           </div>
           <StatsHud stats={stats} fps={info.fps} backend={info.backend} />
           <Toasts toasts={toasts} />
@@ -731,9 +639,6 @@ export default function App() {
             <span>
               <kbd>V</kbd> fields
             </span>
-            <span>
-              <kbd>C</kbd> codex
-            </span>
           </div>
         </section>
         <Inspector atom={selected} graph={graph} onPatch={patchAtom} onRotate={rotateAtom} onDelete={deleteAtom} onPinMolecule={pinMolecule} />
@@ -753,20 +658,6 @@ export default function App() {
             <small>replaces the current field</small>
           </div>
         </div>
-      )}
-
-      {codexOpen && (
-        <Codex
-          progress={progress}
-          meter={meter}
-          sandbox={origin === 'sandbox'}
-          onClose={() => setCodexOpen(false)}
-          onReset={() => {
-            const p = freshProgress()
-            progressRef.current = p
-            setProgressState(p)
-          }}
-        />
       )}
     </div>
   )

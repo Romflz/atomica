@@ -288,8 +288,6 @@ function FieldGuide() {
           <dd>run / step</dd>
           <dt>V</dt>
           <dd>show / hide force fields</dd>
-          <dt>C</dt>
-          <dd>open the Codex</dd>
           <dt>Corner handle</dt>
           <dd>resize the field</dd>
           <dt>⌘S · ⌘O</dt>

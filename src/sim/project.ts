@@ -20,13 +20,9 @@ export const MAX_PROJECT_BYTES = 8 * 1024 * 1024
 const MAX_NOTES = 200
 const MAX_NOTE_LENGTH = 120
 
-/** Whether a world counts as the player's own build (for discoveries) or a preset being watched. */
-export type Origin = 'sandbox' | 'preset'
-
 export interface Project {
   world: World
   notes: Note[]
-  origin: Origin
 }
 
 export class ProjectError extends Error {}
@@ -35,7 +31,7 @@ export class ProjectError extends Error {}
 const ATOM_FIELDS = ['kind', 'x', 'y', 'rot', 'pinned', 'out', 'on', 'period', 'radius', 'delay', 'chance', 'channel', 'mem', 'prev'] as const
 
 /** Serialise a project: readable, with one atom per line so files diff and edit nicely. */
-export function exportProject({ world, notes, origin }: Project): string {
+export function exportProject({ world, notes }: Project): string {
   const atom = (a: Atom) => {
     const o: Record<string, unknown> = {}
     for (const k of ATOM_FIELDS) if (a[k] !== undefined) o[k] = a[k]
@@ -46,7 +42,6 @@ export function exportProject({ world, notes, origin }: Project): string {
     version: PROJECT_VERSION,
     grid: 'hex',
     exportedAt: new Date().toISOString(),
-    origin,
   }
   const lines = [
     '{',
@@ -148,7 +143,6 @@ export function importProject(text: string): { project: Project; warnings: strin
     project: {
       world: { cols, rows, tick: isInt(w.tick) && w.tick >= 0 ? w.tick : 0, heat: isNum(w.heat) ? clamp(w.heat, 0, 1) : 0, atoms },
       notes,
-      origin: data.origin === 'preset' ? 'preset' : 'sandbox',
     },
     warnings,
   }
