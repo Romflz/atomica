@@ -292,6 +292,10 @@ function FieldGuide() {
           <dd>open the Codex</dd>
           <dt>Corner handle</dt>
           <dd>resize the field</dd>
+          <dt>⌘S · ⌘O</dt>
+          <dd>export · import project</dd>
+          <dt>Drop .json</dt>
+          <dd>open a project</dd>
           <dt>Wheel · Drag bg</dt>
           <dd>zoom · pan</dd>
         </dl>

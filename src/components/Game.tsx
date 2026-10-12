@@ -13,7 +13,7 @@ const iconAtom = (kind: AtomKind) => {
 
 export interface Toast {
   id: number
-  kind: 'discovery' | 'level'
+  kind: 'discovery' | 'level' | 'project' | 'error'
   title: string
   detail: string
   icon: AtomKind
@@ -40,14 +40,16 @@ export function LevelBadge({ xp, onOpen }: { xp: number; onOpen: () => void }) {
   )
 }
 
+const TOAST_LABEL: Record<Toast['kind'], string> = { discovery: 'DISCOVERY', level: 'LEVEL UP', project: 'PROJECT', error: 'COULD NOT OPEN' }
+
 export function Toasts({ toasts }: { toasts: Toast[] }) {
   return (
     <div className="toasts" aria-live="polite">
       {toasts.map((t) => (
-        <div key={t.id} className={`toast ${t.kind}`} style={{ ['--c' as string]: DEFS[t.icon].color }}>
+        <div key={t.id} className={`toast ${t.kind}`} style={{ ['--c' as string]: t.kind === 'error' ? '#ff3b5c' : DEFS[t.icon].color }}>
           <AtomIcon atom={iconAtom(t.icon)} size={44} />
           <div>
-            <small>{t.kind === 'level' ? 'LEVEL UP' : 'DISCOVERY'}</small>
+            <small>{TOAST_LABEL[t.kind]}</small>
             <b>{t.title}</b>
             <span>{t.detail}</span>
           </div>

@@ -17,6 +17,8 @@ import { MAX_SIZE, MIN_SIZE, primordialSoup, SCENES } from './sim/demos'
 import type { Note, Size } from './sim/demos'
 import { buildGraph, cellKey, emptyEvents, step } from './sim/engine'
 import { delta, translate, turnDelta } from './sim/hex'
+import { exportProject, importProject, MAX_PROJECT_BYTES, ProjectError } from './sim/project'
+import type { Origin, Project } from './sim/project'
 import type { Graph } from './sim/engine'
 import type { Atom, AtomKind, World } from './sim/types'
 import './App.css'
@@ -42,8 +44,6 @@ type Gesture =
   | { type: 'press'; atomId: string; sx: number; sy: number; shift: boolean }
   | { type: 'drag' }
   | { type: 'resize' }
-
-type Origin = 'sandbox' | 'preset'
 
 // Square-grid saves (v2) don't fit the hex grid, so hex worlds save under a new key.
 const SAVE_KEY = 'atomforge.hex.v1'
@@ -128,9 +128,11 @@ export default function App() {
   const [progress, setProgressState] = useState<Progress>(initialProgress)
   const [toasts, setToasts] = useState<Toast[]>([])
   const [codexOpen, setCodexOpen] = useState(false)
+  const [fileDrag, setFileDrag] = useState(false)
 
   const hostRef = useRef<HTMLDivElement>(null)
   const paletteRef = useRef<HTMLElement>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
   const gesture = useRef<Gesture | null>(null)
   const worldRef = useRef(world)
   const viewRef = useRef(view)
@@ -363,6 +365,84 @@ export default function App() {
     [commit, fit, updateProgress],
   )
 
+  // ── Project files ─────────────────────────────────────────────────
+  const exportFile = () => {
+    const text = exportProject({ world: worldRef.current, notes, origin: originRef.current })
+    const d = new Date()
+    const pad = (n: number) => String(n).padStart(2, '0')
+    const stamp = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}`
+    const url = URL.createObjectURL(new Blob([text], { type: 'application/json' }))
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `atomforge-${sceneId === 'custom' ? 'build' : sceneId}-${stamp}.json`
+    a.click()
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+    const n = worldRef.current.atoms.length
+    pushToast({ kind: 'project', title: 'Project exported', detail: `${n} atom${n === 1 ? '' : 's'} on a ${worldRef.current.cols}×${worldRef.current.rows} field`, icon: 'fabricator' })
+  }
+
+  const openProject = useCallback(
+    ({ world: w, notes: n, origin: o }: Project) => {
+      commit(() => w)
+      setNotes(n)
+      setSceneId('custom')
+      setOrigin(o)
+      originRef.current = o
+      setSelectedId(null)
+      lastGrip.current = new Set()
+      pendingEvents.current = emptyEvents()
+      updateProgress((p) => (w.cols * w.rows > p.maxArea ? { ...p, maxArea: w.cols * w.rows } : p))
+      requestAnimationFrame(fit)
+    },
+    [commit, fit, updateProgress],
+  )
+
+  const importFile = useCallback(
+    async (file: File) => {
+      try {
+        if (file.size > MAX_PROJECT_BYTES) throw new ProjectError('That file is too large to be a project (over 8 MB).')
+        const { project, warnings } = importProject(await file.text())
+        openProject(project)
+        const n = project.world.atoms.length
+        const detail = [`${n} atom${n === 1 ? '' : 's'} from ${file.name}`, ...warnings].join(' · ')
+        pushToast({ kind: 'project', title: 'Project imported', detail, icon: 'fabricator' })
+      } catch (e) {
+        const detail = e instanceof ProjectError ? e.message : 'The file could not be read.'
+        pushToast({ kind: 'error', title: file.name, detail, icon: 'not' })
+      }
+    },
+    [openProject, pushToast],
+  )
+
+  // Drop a project file anywhere on the window to open it.
+  useEffect(() => {
+    const hasFiles = (e: DragEvent) => !!e.dataTransfer?.types.includes('Files')
+    const over = (e: DragEvent) => {
+      if (!hasFiles(e)) return
+      e.preventDefault()
+      e.dataTransfer!.dropEffect = 'copy'
+      setFileDrag(true)
+    }
+    const leave = (e: DragEvent) => {
+      if (!e.relatedTarget) setFileDrag(false)
+    }
+    const dropped = (e: DragEvent) => {
+      if (!hasFiles(e)) return
+      e.preventDefault()
+      setFileDrag(false)
+      const file = e.dataTransfer!.files[0]
+      if (file) void importFile(file)
+    }
+    window.addEventListener('dragover', over)
+    window.addEventListener('dragleave', leave)
+    window.addEventListener('drop', dropped)
+    return () => {
+      window.removeEventListener('dragover', over)
+      window.removeEventListener('dragleave', leave)
+      window.removeEventListener('drop', dropped)
+    }
+  }, [importFile])
+
   // ── Drag & drop ───────────────────────────────────────────────────
   const beginDrag = (items: DragItem[], from: DragState['from'], cx: number, cy: number) => {
     gesture.current = { type: 'drag' }
@@ -494,6 +574,17 @@ export default function App() {
       const t = e.target as HTMLElement
       if (t.tagName === 'INPUT' || t.tagName === 'SELECT' || t.tagName === 'TEXTAREA') return
       const k = e.key.toLowerCase()
+      // Modifier shortcuts are file commands; never let them fall through to the single-key ones (⌘C, ⌘R…).
+      if (e.metaKey || e.ctrlKey || e.altKey) {
+        if ((e.metaKey || e.ctrlKey) && k === 's') {
+          e.preventDefault()
+          exportFile()
+        } else if ((e.metaKey || e.ctrlKey) && k === 'o') {
+          e.preventDefault()
+          fileInputRef.current?.click()
+        }
+        return
+      }
       if (codexOpen && k !== 'c') return
       const sel = selectedRef.current
       if (k === ' ') {
@@ -587,6 +678,19 @@ export default function App() {
           writeJSON(RENDERER_KEY, v)
         }}
         onFit={fit}
+        onExport={exportFile}
+        onImport={() => fileInputRef.current?.click()}
+      />
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept=".json,application/json"
+        hidden
+        onChange={(e) => {
+          const file = e.target.files?.[0]
+          e.target.value = ''
+          if (file) void importFile(file)
+        }}
       />
       <main className="workspace">
         <Palette panelRef={paletteRef} dissolve={!!drag && drag.from === 'field' && drag.overPalette} onGrab={grabFromPalette} />
@@ -639,6 +743,15 @@ export default function App() {
         <div className="drag-avatar" style={{ transform: `translate(${drag.px}px, ${drag.py}px)` }}>
           <AtomIcon atom={drag.items[0].atom} size={64} />
           {drag.items.length > 1 && <span className="drag-count">+{drag.items.length - 1}</span>}
+        </div>
+      )}
+
+      {fileDrag && (
+        <div className="file-drop" aria-hidden>
+          <div>
+            DROP TO OPEN PROJECT
+            <small>replaces the current field</small>
+          </div>
         </div>
       )}
 

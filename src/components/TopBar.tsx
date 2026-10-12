@@ -32,6 +32,8 @@ interface Props {
   onResize: (size: Size) => void
   onPreferWebGL: (v: boolean) => void
   onFit: () => void
+  onExport: () => void
+  onImport: () => void
 }
 
 export function TopBar(p: Props) {
@@ -91,6 +93,7 @@ export function TopBar(p: Props) {
           ↺ {p.sceneId === 'custom' ? 'Clear' : 'Reload'}
         </button>
         <SizeMenu size={p.size} backend={p.backend} preferWebGL={p.preferWebGL} onResize={p.onResize} onPreferWebGL={p.onPreferWebGL} />
+        <ProjectMenu onExport={p.onExport} onImport={p.onImport} />
         <button className="btn ghost-btn" onClick={p.onFit} title="Fit view (F)">
           ⤢
         </button>
@@ -98,6 +101,61 @@ export function TopBar(p: Props) {
 
       <div className="topbar-end">{p.levelBadge}</div>
     </header>
+  )
+}
+
+const MOD = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘' : 'Ctrl+'
+
+/** A small popover anchored to a top-bar button that closes when you click elsewhere. */
+function usePopover() {
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (!open) return
+    const close = (e: PointerEvent) => {
+      if (!ref.current?.contains(e.target as Node)) setOpen(false)
+    }
+    window.addEventListener('pointerdown', close)
+    return () => window.removeEventListener('pointerdown', close)
+  }, [open])
+  return { open, setOpen, ref }
+}
+
+function ProjectMenu({ onExport, onImport }: { onExport: () => void; onImport: () => void }) {
+  const { open, setOpen, ref } = usePopover()
+  return (
+    <div className="menu-anchor" ref={ref}>
+      <button className={`btn${open ? ' active' : ''}`} onClick={() => setOpen((o) => !o)} title="Save or open a project file">
+        ⇅ Project
+      </button>
+      {open && (
+        <div className="popover project-pop">
+          <h4>Project file</h4>
+          <button
+            className="btn wide"
+            onClick={() => {
+              setOpen(false)
+              onExport()
+            }}
+          >
+            ⤓ Export JSON <kbd>{MOD}S</kbd>
+          </button>
+          <button
+            className="btn wide"
+            onClick={() => {
+              setOpen(false)
+              onImport()
+            }}
+          >
+            ⤒ Import JSON <kbd>{MOD}O</kbd>
+          </button>
+          <p className="muted small">
+            Export saves the whole field: size, heat, every atom with its settings and charge, and notes. Importing replaces the current field. You can also drop a
+            .json file anywhere on the window.
+          </p>
+        </div>
+      )}
+    </div>
   )
 }
 
@@ -114,18 +172,8 @@ function SizeMenu({
   onResize: (s: Size) => void
   onPreferWebGL: (v: boolean) => void
 }) {
-  const [open, setOpen] = useState(false)
+  const { open, setOpen, ref } = usePopover()
   const [draft, setDraft] = useState(size)
-  const ref = useRef<HTMLDivElement>(null)
-
-  useEffect(() => {
-    if (!open) return
-    const close = (e: PointerEvent) => {
-      if (!ref.current?.contains(e.target as Node)) setOpen(false)
-    }
-    window.addEventListener('pointerdown', close)
-    return () => window.removeEventListener('pointerdown', close)
-  }, [open])
 
   const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, Math.round(v) || lo))
   const apply = (s: Size) => {
@@ -134,7 +182,7 @@ function SizeMenu({
   }
 
   return (
-    <div className="size-menu" ref={ref}>
+    <div className="menu-anchor size-menu" ref={ref}>
       <button
         className={`btn${open ? ' active' : ''}`}
         onClick={() => {
@@ -155,7 +203,7 @@ function SizeMenu({
                 <span>
                   {s.cols}×{s.rows}
                 </span>
-                <i style={{ width: `${(s.cols / 200) * 100}%`, height: `${(s.rows / 120) * 26 + 4}px` }} />
+                <i style={{ width: `${(s.cols / 200) * 100}%`, height: `${(s.rows / 140) * 26 + 4}px` }} />
               </button>
             ))}
           </div>

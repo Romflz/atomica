@@ -241,6 +241,15 @@ select:focus {
   width: 100%;
   margin-top: 8px;
 }
+.project-pop {
+  width: 280px;
+}
+.project-pop .btn.wide {
+  justify-content: space-between;
+}
+.project-pop .btn.wide:first-of-type {
+  margin-top: 0;
+}
 .ghost-btn {
   font-size: 14px;
   padding: 5px 10px;
@@ -1042,6 +1051,9 @@ kbd {
   font-size: 10px;
   color: var(--muted);
 }
+.toast.error {
+  background: linear-gradient(135deg, rgba(60, 8, 20, 0.95), rgba(6, 10, 22, 0.95));
+}
 .toast.level {
   --c: #ff6ee0;
   background: linear-gradient(135deg, rgba(60, 10, 60, 0.95), rgba(6, 10, 22, 0.95));
@@ -1057,6 +1069,37 @@ kbd {
     opacity: 0;
     transform: translateY(-10px);
   }
+}
+
+/* File drop overlay */
+.file-drop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+  background: rgba(4, 8, 20, 0.72);
+  backdrop-filter: blur(3px);
+  animation: fade-in 0.12s ease-out;
+}
+.file-drop div {
+  padding: 28px 40px;
+  border: 2px dashed var(--accent);
+  border-radius: 18px;
+  text-align: center;
+  font-family: var(--font-display);
+  letter-spacing: 0.12em;
+  color: var(--accent);
+  background: rgba(9, 14, 30, 0.9);
+  box-shadow: 0 0 40px -10px var(--accent);
+}
+.file-drop small {
+  display: block;
+  margin-top: 8px;
+  font-family: var(--font-mono);
+  letter-spacing: 0.05em;
+  color: var(--muted);
 }
 
 /* Codex */
@@ -1203,7 +1246,7 @@ kbd {
 }
 
 /* Field size popover */
-.size-menu {
+.menu-anchor {
   position: relative;
 }
 .popover {
