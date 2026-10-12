@@ -32,6 +32,7 @@ export type AtomKind =
   | 'gyron'
   | 'fabricator'
   | 'devourer'
+  | 'bedrock'
 
 export interface Atom {
   id: string
@@ -43,6 +44,11 @@ export interface Atom {
   rot: number
   /** Pinned molecules ignore fields, heat, thrust and predators. */
   pinned: boolean
+  /**
+   * Challenge fixtures: `fixed` parts cannot be moved, rotated or deleted by
+   * the player; `turn` parts can only be rotated. Physics ignores this.
+   */
+  lock?: 'fixed' | 'turn'
   /** Current output / lit / active state. */
   out: boolean
   /** Spark: manual toggle. */

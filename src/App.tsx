@@ -1,23 +1,31 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { PointerEvent as ReactPointerEvent } from 'react'
 import { AtomIcon } from './components/AtomView'
+import { ChallengeButton, ChallengeHud, ChallengeList } from './components/Challenges'
 import { GpuField } from './components/GpuField'
 import type { RendererInfo } from './components/GpuField'
 import { Inspector } from './components/Inspector'
 import { Palette } from './components/Palette'
+import type { PartLimits } from './components/Palette'
 import { Toasts } from './components/Toasts'
 import type { Toast } from './components/Toasts'
 import { StatsHud, TopBar } from './components/TopBar'
+import { turnsUsed, usage } from './game/challenge'
+import type { CheckCtx, Verdict, Zone } from './game/challenge'
+import { challengeById, CHALLENGES, isUnlocked } from './game/challenges'
 import type { FieldScene, Ghost, View } from './gpu/FieldRenderer'
 import { boardSize, pixelToCell, sizeAt } from './render/geometry'
 import { DEFS, makeAtom } from './sim/atoms'
 import { MAX_SIZE, MIN_SIZE, primordialSoup, SCENES } from './sim/demos'
 import type { Note, Size } from './sim/demos'
-import { buildGraph, cellKey, step } from './sim/engine'
+import { buildGraph, cellKey, emptyEvents, step } from './sim/engine'
 import { delta, translate, turnDelta } from './sim/hex'
+
+/** An axial offset turned 60° anticlockwise (the inverse of `turnDelta`). */
+const unturnDelta = (dq: number, dr: number): [number, number] => [dq + dr, -dq]
 import { exportProject, importProject, MAX_PROJECT_BYTES, ProjectError } from './sim/project'
 import type { Project } from './sim/project'
-import type { Atom, AtomKind, World } from './sim/types'
+import type { Atom, AtomKind, TickEvents, World } from './sim/types'
 import './App.css'
 
 /** A dragged atom and its axial offset from the atom under the pointer. */
@@ -38,13 +46,14 @@ interface DragState {
 
 type Gesture =
   | { type: 'pan'; sx: number; sy: number; vx: number; vy: number; moved: boolean }
-  | { type: 'press'; atomId: string; sx: number; sy: number; shift: boolean }
+  | { type: 'press'; atomId: string; sx: number; sy: number; shift: boolean; locked: boolean }
   | { type: 'drag' }
   | { type: 'resize' }
 
 // Square-grid saves (v2) don't fit the hex grid, so hex worlds save under a new key.
 const SAVE_KEY = 'atomforge.hex.v1'
 const RENDERER_KEY = 'atomforge.renderer'
+const CHALLENGE_KEY = 'atomforge.challenges.v1'
 const START_SCENE = 'foodchain'
 
 function readJSON<T>(key: string): T | null {
@@ -64,32 +73,57 @@ function writeJSON(key: string, value: unknown) {
   }
 }
 
+/** A challenge in progress. The map itself lives in the ordinary world state. */
+interface Session {
+  id: string
+  zones: Zone[]
+  tags: Record<string, string>
+  /** Where each turnable piece started; turns spent are measured from here, so turning back refunds them. */
+  startRots: Record<string, number>
+  solved: boolean
+}
+
 interface Saved {
   world: World
   notes: Note[]
   sceneId: string
+  session?: Session | null
+  totals?: TickEvents
 }
 
 function initial(): Saved {
   const saved = readJSON<Saved>(SAVE_KEY)
   if (saved?.world && Array.isArray(saved.world.atoms) && saved.world.atoms.every((a) => a.kind in DEFS) && saved.world.atoms.length) {
-    return { world: saved.world, notes: saved.notes ?? [], sceneId: 'custom' }
+    const session = saved.session?.startRots && challengeById(saved.session.id) ? saved.session : null
+    return { world: saved.world, notes: saved.notes ?? [], sceneId: session ? 'challenge' : 'custom', session, totals: saved.totals }
   }
   const scene = SCENES.find((s) => s.id === START_SCENE)!.make({ cols: 48, rows: 34 })
   return { ...scene, sceneId: START_SCENE }
 }
 
-/** Where a dragged set of atoms would land, and whether every cell is free. */
-function placement(world: World, drag: DragState): Ghost | null {
+const zoneSet = (zones: Zone[], kind: Zone['kind'], cols: number) => {
+  const cells = zones.filter((z) => z.kind === kind).flatMap((z) => z.cells)
+  return cells.length ? new Set(cells.map(([x, y]) => y * cols + x)) : null
+}
+
+/** What a verified challenge's verdict depends on: the pieces and their settings, not their live charge. */
+const structureKey = (w: World) =>
+  w.atoms.map((a) => `${a.kind}${a.x},${a.y},${a.rot},${a.on ? 1 : 0},${a.delay ?? ''},${a.period ?? ''},${a.radius ?? ''},${a.chance ?? ''},${a.channel ?? ''}`).join('|')
+
+/** Where a dragged set of atoms would land, and whether every cell is free (and allowed, in a challenge). */
+function placement(world: World, drag: DragState, zones: Zone[] = []): Ghost | null {
   if (!drag.cell) return null
   const occupied = new Set(world.atoms.map((a) => cellKey(world, a.x, a.y)))
   const cells = drag.items.map((i) => {
     const [x, y] = translate(drag.cell!.x, drag.cell!.y, i.dq, i.dr)
     return { atom: i.atom, x, y }
   })
-  const valid = cells.every(
-    (c) => c.x >= 0 && c.y >= 0 && c.x < world.cols && c.y < world.rows && !occupied.has(cellKey(world, c.x, c.y)),
-  )
+  const build = zoneSet(zones, 'build', world.cols)
+  const goal = zoneSet(zones, 'goal', world.cols)
+  const valid = cells.every((c) => {
+    const key = cellKey(world, c.x, c.y)
+    return c.x >= 0 && c.y >= 0 && c.x < world.cols && c.y < world.rows && !occupied.has(key) && (!build || build.has(key)) && !goal?.has(key)
+  })
   return { cells, valid }
 }
 
@@ -108,6 +142,10 @@ export default function App() {
   const [preferWebGL, setPreferWebGL] = useState(() => readJSON<boolean>(RENDERER_KEY) ?? false)
   const [info, setInfo] = useState<RendererInfo>({ backend: '…', fps: 0 })
   const [toasts, setToasts] = useState<Toast[]>([])
+  const [session, setSessionState] = useState<Session | null>(boot.session ?? null)
+  const [solvedMap, setSolvedMap] = useState<Record<string, number>>(() => readJSON<{ solved: Record<string, number> }>(CHALLENGE_KEY)?.solved ?? {})
+  const [verdict, setVerdict] = useState<Verdict | null>(null)
+  const [listOpen, setListOpen] = useState(false)
   const [fileDrag, setFileDrag] = useState(false)
 
   const hostRef = useRef<HTMLDivElement>(null)
@@ -119,6 +157,10 @@ export default function App() {
   const dragRef = useRef(drag)
   const selectedRef = useRef(selectedId)
   const resizeRef = useRef(resizePreview)
+  const sessionRef = useRef(session)
+  const runningRef = useRef(running)
+  /** What happened on the field since the current challenge started. */
+  const eventsRef = useRef<TickEvents>(boot.totals ?? emptyEvents())
 
   const graph = useMemo(() => buildGraph(world), [world])
   const selected = selectedId ? (graph.byId.get(selectedId) ?? null) : null
@@ -128,7 +170,13 @@ export default function App() {
     dragRef.current = drag
     selectedRef.current = selectedId
     resizeRef.current = resizePreview
+    runningRef.current = running
   })
+
+  const setSession = useCallback((s: Session | null) => {
+    sessionRef.current = s
+    setSessionState(s)
+  }, [])
 
   /**
    * All world changes go through here, synchronously against the ref, so a
@@ -148,7 +196,7 @@ export default function App() {
     const interval = 1000 / tps
     const loop = () => {
       const t0 = performance.now()
-      commit(step)
+      commit((w) => step(w, eventsRef.current))
       handle = window.setTimeout(loop, Math.max(0, interval - (performance.now() - t0)))
     }
     handle = window.setTimeout(loop, interval)
@@ -162,13 +210,15 @@ export default function App() {
     window.setTimeout(() => setToasts((list) => list.filter((x) => x.id !== id)), 4800)
   }, [])
 
+  const notice = useCallback((detail: string) => pushToast({ kind: 'notice', title: 'Not allowed here', detail, icon: 'bedrock' }), [pushToast])
+
   // ── Autosave (throttled; a running sim changes the world every tick) ──
   useEffect(() => {
     let last: World | null = null
     const id = window.setInterval(() => {
       if (worldRef.current === last) return
       last = worldRef.current
-      writeJSON(SAVE_KEY, { world: last, notes, sceneId })
+      writeJSON(SAVE_KEY, { world: last, notes, sceneId, session: sessionRef.current, totals: eventsRef.current })
     }, 2000)
     return () => window.clearInterval(id)
   }, [notes, sceneId])
@@ -180,9 +230,11 @@ export default function App() {
     const { width, height } = host.getBoundingClientRect()
     const w = worldRef.current
     const pad = 28
+    // Leave room for the challenge panel on the left so it never hides the map.
+    const left = sessionRef.current ? 330 : pad
     const board = boardSize(w.cols, w.rows)
-    const k = Math.min((width - pad * 2) / board.w, (height - pad * 2) / board.h)
-    setView({ k, x: (width - board.w * k) / 2, y: (height - board.h * k) / 2 })
+    const k = Math.min((width - left - pad) / board.w, (height - pad * 2) / board.h)
+    setView({ k, x: left + (width - left - pad - board.w * k) / 2, y: (height - board.h * k) / 2 })
   }, [])
 
   useLayoutEffect(() => {
@@ -237,13 +289,25 @@ export default function App() {
     [commit],
   )
 
+  /** Turn an atom 60° clockwise (dir 1) or back (dir -1). */
   const rotateAtom = useCallback(
-    (id: string) => commit((w) => ({ ...w, atoms: w.atoms.map((a) => (a.id === id ? { ...a, rot: (a.rot + 1) % 6 } : a)) })),
-    [commit],
+    (id: string, dir: 1 | -1 = 1) => {
+      const target = worldRef.current.atoms.find((a) => a.id === id)
+      if (!target || target.lock === 'fixed') return
+      const turn = (w: World): World => ({ ...w, atoms: w.atoms.map((a) => (a.id === id ? { ...a, rot: (a.rot + dir + 6) % 6 } : a)) })
+      if (target.lock === 'turn') {
+        const s = sessionRef.current
+        const budget = challengeById(s?.id ?? '')?.turns ?? 0
+        if (!s || turnsUsed(turn(worldRef.current), s.startRots) > budget) return notice('Out of turns. Turn a piece back to get its turns back.')
+      }
+      commit(turn)
+    },
+    [commit, notice],
   )
 
   const deleteAtom = useCallback(
     (id: string) => {
+      if (worldRef.current.atoms.find((a) => a.id === id)?.lock) return
       commit((w) => ({ ...w, atoms: w.atoms.filter((a) => a.id !== id) }))
       setSelectedId((s) => (s === id ? null : s))
     },
@@ -255,7 +319,7 @@ export default function App() {
       commit((w) => {
         const g = buildGraph(w)
         const mi = g.molOf.get(id)
-        if (mi === undefined) return w
+        if (mi === undefined || g.molecules[mi].some((m) => g.byId.get(m)!.lock)) return w
         const ids = new Set(g.molecules[mi])
         return { ...w, atoms: w.atoms.map((a) => (ids.has(a.id) ? { ...a, pinned } : a)) }
       }),
@@ -264,16 +328,98 @@ export default function App() {
 
   const resizeField = useCallback(
     (size: Size, refit: boolean) => {
+      if (sessionRef.current) return notice('The field size is fixed during a challenge.')
       const cols = Math.max(MIN_SIZE.cols, Math.min(MAX_SIZE.cols, size.cols))
       const rows = Math.max(MIN_SIZE.rows, Math.min(MAX_SIZE.rows, size.rows))
       commit((w) => (w.cols === cols && w.rows === rows ? w : { ...w, cols, rows, atoms: w.atoms.filter((a) => a.x < cols && a.y < rows) }))
       if (refit) requestAnimationFrame(fit)
     },
-    [commit, fit],
+    [commit, fit, notice],
   )
+
+  // ── Challenges ────────────────────────────────────────────────────
+  const startChallenge = useCallback(
+    (id: string) => {
+      const ch = challengeById(id)
+      if (!ch) return
+      const setup = ch.build()
+      commit(() => setup.world)
+      setNotes(setup.notes)
+      setSceneId('challenge')
+      const startRots = Object.fromEntries(setup.world.atoms.filter((a) => a.lock === 'turn').map((a) => [a.id, a.rot]))
+      setSession({ id, zones: setup.zones, tags: setup.tags, startRots, solved: false })
+      eventsRef.current = emptyEvents()
+      setVerdict(null)
+      setSelectedId(null)
+      setListOpen(false)
+      // Circuits run live so lamps respond as you wire them; anything that
+      // moves starts paused, so a half-built ship cannot fly off.
+      setRunning(!!ch.verified)
+      requestAnimationFrame(fit)
+    },
+    [commit, fit, setSession],
+  )
+
+  /** Leave the challenge but keep the map, unlocked, to tinker with. */
+  const exitChallenge = useCallback(() => {
+    setSession(null)
+    setVerdict(null)
+    setSceneId('custom')
+    commit((w) => ({ ...w, atoms: w.atoms.map((a) => (a.lock ? { ...a, lock: undefined } : a)) }))
+  }, [commit, setSession])
+
+  // Judge the challenge a couple of times a second. Verified challenges only re-run when the build changes.
+  const activeId = session?.id
+  useEffect(() => {
+    const ch = activeId ? challengeById(activeId) : undefined
+    if (!ch) return
+    let lastKey = ''
+    let last: Verdict | null = null
+    const judge = () => {
+      const s = sessionRef.current
+      if (!s || s.id !== ch.id) return
+      const world = worldRef.current
+      const ctx: CheckCtx = {
+        world,
+        graph: buildGraph(world),
+        setup: { world, notes: [], zones: s.zones, tags: s.tags },
+        totals: eventsRef.current,
+        running: runningRef.current,
+      }
+      let v: Verdict
+      if (ch.verified) {
+        const key = structureKey(world)
+        v = key === lastKey && last ? last : ch.check(ctx)
+        lastKey = key
+        last = v
+      } else {
+        v = ch.check(ctx)
+      }
+      setVerdict((cur) => (cur && cur.solved === v.solved && cur.status === v.status ? cur : v))
+      if (v.solved && !s.solved) {
+        setSession({ ...s, solved: true })
+        setSolvedMap((m) => {
+          if (m[ch.id]) return m
+          const next = { ...m, [ch.id]: Date.now() }
+          writeJSON(CHALLENGE_KEY, { solved: next })
+          return next
+        })
+        pushToast({ kind: 'challenge', title: ch.title, detail: v.status, icon: 'lumen' })
+      }
+    }
+    judge()
+    const id = window.setInterval(judge, 400)
+    return () => window.clearInterval(id)
+  }, [activeId, pushToast, setSession])
 
   const loadScene = useCallback(
     (id: string) => {
+      if (id === 'challenge') {
+        if (sessionRef.current) startChallenge(sessionRef.current.id)
+        return
+      }
+      setSession(null)
+      setVerdict(null)
       const scene = SCENES.find((s) => s.id === id) ?? SCENES.find((s) => s.id === 'empty')!
       const cur = worldRef.current
       const made = id === 'soup' ? primordialSoup({ cols: Math.max(cur.cols, 36), rows: Math.max(cur.rows, 26) }) : scene.make({ cols: cur.cols, rows: cur.rows })
@@ -283,7 +429,7 @@ export default function App() {
       setSelectedId(null)
       requestAnimationFrame(fit)
     },
-    [commit, fit],
+    [commit, fit, setSession, startChallenge],
   )
 
   // ── Project files ─────────────────────────────────────────────────
@@ -307,10 +453,12 @@ export default function App() {
       commit(() => w)
       setNotes(n)
       setSceneId('custom')
+      setSession(null)
+      setVerdict(null)
       setSelectedId(null)
       requestAnimationFrame(fit)
     },
-    [commit, fit],
+    [commit, fit, setSession],
   )
 
   const importFile = useCallback(
@@ -373,7 +521,10 @@ export default function App() {
     const g = buildGraph(worldRef.current)
     const anchor = g.byId.get(atomId)
     if (!anchor) return
-    const ids = wholeMolecule ? [atomId, ...g.molecules[g.molOf.get(atomId)!].filter((id) => id !== atomId)] : [atomId]
+    // A molecule bonded to challenge fixtures cannot come along whole; just the grabbed atom does.
+    const mol = g.molecules[g.molOf.get(atomId)!]
+    const whole = wholeMolecule && !mol.some((id) => g.byId.get(id)!.lock)
+    const ids = whole ? [atomId, ...mol.filter((id) => id !== atomId)] : [atomId]
     const lifted = new Set(ids)
     const items = ids.map((id) => {
       const a = g.byId.get(id)!
@@ -397,7 +548,7 @@ export default function App() {
     const d = dragRef.current
     if (!d) return
     setDrag(null)
-    const ghost = placement(worldRef.current, d)
+    const ghost = placement(worldRef.current, d, sessionRef.current?.zones)
     if (ghost?.valid) {
       const placed = ghost.cells.map((c) => ({ ...c.atom, x: c.x, y: c.y }))
       commit((cur) => ({ ...cur, atoms: [...cur.atoms, ...placed] }))
@@ -418,14 +569,14 @@ export default function App() {
     if (d?.from === 'field') restore(d.items)
   }
 
-  const rotateDrag = () =>
+  const rotateDrag = (dir: 1 | -1) =>
     setDrag((d) =>
       d
         ? {
             ...d,
             items: d.items.map((i) => {
-              const [dq, dr] = turnDelta(i.dq, i.dr)
-              return { atom: { ...i.atom, rot: (i.atom.rot + 1) % 6 }, dq, dr }
+              const [dq, dr] = dir === 1 ? turnDelta(i.dq, i.dr) : unturnDelta(i.dq, i.dr)
+              return { atom: { ...i.atom, rot: (i.atom.rot + dir + 6) % 6 }, dq, dr }
             }),
           }
         : d,
@@ -442,7 +593,12 @@ export default function App() {
         if (Math.abs(dx) + Math.abs(dy) > 3) g.moved = true
         setView((v) => ({ ...v, x: g.vx + dx, y: g.vy + dy }))
       } else if (g.type === 'press') {
-        if (Math.hypot(e.clientX - g.sx, e.clientY - g.sy) > 5) liftFromField(g.atomId, g.shift, e.clientX, e.clientY)
+        if (Math.hypot(e.clientX - g.sx, e.clientY - g.sy) <= 5) return
+        // Dragging a fixture pans the view instead of moving it.
+        if (g.locked) {
+          const v = viewRef.current
+          gesture.current = { type: 'pan', sx: g.sx, sy: g.sy, vx: v.x, vy: v.y, moved: true }
+        } else liftFromField(g.atomId, g.shift, e.clientX, e.clientY)
       } else if (g.type === 'resize') {
         const { wx, wy } = toWorld(e.clientX, e.clientY)
         const at = sizeAt(wx, wy)
@@ -505,21 +661,23 @@ export default function App() {
         e.preventDefault()
         setRunning((r) => !r)
       } else if (k === '.' || k === 'n') {
-        commit(step)
+        commit((w) => step(w, eventsRef.current))
       } else if (k === 'r') {
-        if (dragRef.current) rotateDrag()
-        else if (sel) rotateAtom(sel)
+        const dir = e.shiftKey ? -1 : 1
+        if (dragRef.current) rotateDrag(dir)
+        else if (sel) rotateAtom(sel, dir)
       } else if ((k === 'delete' || k === 'backspace') && sel) {
         deleteAtom(sel)
       } else if (k === 'p' && sel) {
         const a = worldRef.current.atoms.find((x) => x.id === sel)
-        if (a) patchAtom(sel, { pinned: !a.pinned })
+        if (a && !a.lock) patchAtom(sel, { pinned: !a.pinned })
       } else if (k === 'f') {
         fit()
       } else if (k === 'v') {
         setShowFields((v) => !v)
       } else if (k === 'escape') {
-        if (dragRef.current) cancelDrag()
+        if (listOpen) setListOpen(false)
+        else if (dragRef.current) cancelDrag()
         else setSelectedId(null)
       }
     }
@@ -528,7 +686,7 @@ export default function App() {
   })
 
   const onAtomPointerDown = useCallback((atom: Atom, e: PointerEvent) => {
-    gesture.current = { type: 'press', atomId: atom.id, sx: e.clientX, sy: e.clientY, shift: e.shiftKey }
+    gesture.current = { type: 'press', atomId: atom.id, sx: e.clientX, sy: e.clientY, shift: e.shiftKey, locked: !!atom.lock }
   }, [])
 
   const onBackgroundPointerDown = useCallback((e: PointerEvent) => {
@@ -538,19 +696,26 @@ export default function App() {
 
   const onResizeHandleDown = useCallback((e: PointerEvent) => {
     e.preventDefault()
+    if (sessionRef.current) return notice('The field size is fixed during a challenge.')
     gesture.current = { type: 'resize' }
     setResizePreview({ cols: worldRef.current.cols, rows: worldRef.current.rows })
-  }, [])
+  }, [notice])
 
   const onInfo = useCallback((i: RendererInfo) => setInfo((cur) => (cur.backend === i.backend && cur.fps === i.fps ? cur : i)), [])
 
   // ── Derived UI ────────────────────────────────────────────────────
-  const ghost = useMemo(() => (drag ? placement(world, drag) : null), [drag, world])
+  const zones = useMemo(() => session?.zones ?? [], [session?.zones])
+  const ghost = useMemo(() => (drag ? placement(world, drag, zones) : null), [drag, world, zones])
   const moveMs = Math.min(160, Math.round((1000 / tps) * 0.85))
   const fieldScene = useMemo<FieldScene>(
-    () => ({ world, graph, notes, selectedId, ghost, showFields, resizePreview, moveMs }),
-    [world, graph, notes, selectedId, ghost, showFields, resizePreview, moveMs],
+    () => ({ world, graph, notes, selectedId, ghost, showFields, resizePreview, moveMs, zones }),
+    [world, graph, notes, selectedId, ghost, showFields, resizePreview, moveMs, zones],
   )
+  const challenge = session ? challengeById(session.id) : undefined
+  const challengeIndex = challenge ? CHALLENGES.indexOf(challenge) : -1
+  const limits = useMemo<PartLimits | null>(() => (challenge ? { budget: challenge.parts, used: usage(world) } : null), [challenge, world])
+  const turnsLeft = challenge?.turns !== undefined && session ? challenge.turns - turnsUsed(world, session.startRots) : null
+  const nextChallenge = challengeIndex >= 0 && challengeIndex + 1 < CHALLENGES.length && isUnlocked(challengeIndex + 1, solvedMap) ? CHALLENGES[challengeIndex + 1] : null
   const stats = useMemo(() => {
     let largest = 0
     let molecules = 0
@@ -575,6 +740,8 @@ export default function App() {
         size={{ cols: world.cols, rows: world.rows }}
         backend={info.backend}
         preferWebGL={preferWebGL}
+        challengeTitle={challenge?.title ?? null}
+        end={<ChallengeButton solved={Object.keys(solvedMap).length} active={!!challenge} onOpen={() => setListOpen(true)} />}
         onToggleRun={() => setRunning((r) => !r)}
         onStep={() => commit(step)}
         onTps={setTps}
@@ -602,7 +769,7 @@ export default function App() {
         }}
       />
       <main className="workspace">
-        <Palette panelRef={paletteRef} dissolve={!!drag && drag.from === 'field' && drag.overPalette} onGrab={grabFromPalette} />
+        <Palette panelRef={paletteRef} dissolve={!!drag && drag.from === 'field' && drag.overPalette} limits={limits} onGrab={grabFromPalette} />
         <section className="stage">
           <GpuField
             scene={fieldScene}
@@ -610,7 +777,7 @@ export default function App() {
             hostRef={hostRef}
             preference={preferWebGL ? 'webgl' : 'webgpu'}
             onAtomPointerDown={onAtomPointerDown}
-            onAtomContextMenu={(a) => rotateAtom(a.id)}
+            onAtomContextMenu={(a, e) => rotateAtom(a.id, e.shiftKey ? -1 : 1)}
             onBackgroundPointerDown={onBackgroundPointerDown}
             onResizeHandleDown={onResizeHandleDown}
             onInfo={onInfo}
@@ -619,6 +786,20 @@ export default function App() {
             <i /> {running ? 'SIMULATING' : 'PAUSED'}
           </div>
           <StatsHud stats={stats} fps={info.fps} backend={info.backend} />
+          {challenge && session && (
+            <ChallengeHud
+              key={challenge.id}
+              challenge={challenge}
+              index={challengeIndex}
+              verdict={verdict}
+              solved={session.solved}
+              turnsLeft={turnsLeft}
+              hasNext={!!nextChallenge}
+              onRestart={() => startChallenge(challenge.id)}
+              onExit={exitChallenge}
+              onNext={() => nextChallenge && startChallenge(nextChallenge.id)}
+            />
+          )}
           <Toasts toasts={toasts} />
           <div className="hint-bar">
             <span>
@@ -628,7 +809,7 @@ export default function App() {
               <kbd>Shift</kbd>+<kbd>Drag</kbd> molecule
             </span>
             <span>
-              <kbd>R</kbd>/<kbd>Right-click</kbd> rotate
+              <kbd>R</kbd>/<kbd>Right-click</kbd> rotate, <kbd>Shift</kbd> back
             </span>
             <span>
               <kbd>P</kbd> pin
@@ -641,7 +822,7 @@ export default function App() {
             </span>
           </div>
         </section>
-        <Inspector atom={selected} graph={graph} onPatch={patchAtom} onRotate={rotateAtom} onDelete={deleteAtom} onPinMolecule={pinMolecule} />
+        <Inspector atom={selected} graph={graph} onPatch={patchAtom} onRotate={rotateAtom} onDelete={deleteAtom} onPinMolecule={pinMolecule} turnsLeft={turnsLeft} />
       </main>
 
       {drag && !drag.cell && (
@@ -650,6 +831,8 @@ export default function App() {
           {drag.items.length > 1 && <span className="drag-count">+{drag.items.length - 1}</span>}
         </div>
       )}
+
+      {listOpen && <ChallengeList solved={solvedMap} activeId={session?.id ?? null} onStart={startChallenge} onClose={() => setListOpen(false)} />}
 
       {fileDrag && (
         <div className="file-drop" aria-hidden>

@@ -1,6 +1,6 @@
 import type { Atom, AtomKind, Port } from './types'
 
-export type Category = 'Source' | 'Wire' | 'Gate' | 'Memory' | 'Sense' | 'Output' | 'Force' | 'Motion' | 'Life'
+export type Category = 'Source' | 'Wire' | 'Gate' | 'Memory' | 'Sense' | 'Output' | 'Force' | 'Motion' | 'Life' | 'Terrain'
 
 export interface ComputeCtx {
   /** Values arriving at each bonded `in` slot. Unbonded slots are absent. */
@@ -331,6 +331,19 @@ export const DEFS: Record<AtomKind, AtomDef> = {
     blurb: 'A hungry void. When charged it erases whatever sits at its mouth. Give it eyes and it hunts.',
     rules: ['Charged: consumes the atom at its mouth', 'Cannot eat pinned atoms or its own body', 'Pair with an Oculus to hunt'],
     compute: anyInput,
+  },
+  bedrock: {
+    kind: 'bedrock',
+    name: 'Bedrock',
+    symbol: 'Br',
+    number: 21,
+    color: '#7d88a6',
+    category: 'Terrain',
+    caption: 'WALL',
+    ports: [null, null, null, null, null, null],
+    blurb: 'Inert rock that walls off parts of a challenge. Nothing bonds to it and nothing passes through it.',
+    rules: ['Bonds to nothing on any side', 'Blocks movement; Oculi can see it', 'Only found in challenges'],
+    compute: () => false,
   },
 }
 

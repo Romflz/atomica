@@ -9,9 +9,11 @@ interface Props {
   atom: Atom | null
   graph: Graph
   onPatch: (id: string, patch: Partial<Atom>) => void
-  onRotate: (id: string) => void
+  onRotate: (id: string, dir?: 1 | -1) => void
   onDelete: (id: string) => void
   onPinMolecule: (id: string, pinned: boolean) => void
+  /** Turns left for rotatable challenge pieces, or null outside such a challenge. */
+  turnsLeft: number | null
 }
 
 const PORT_LABEL = { in: 'slot', out: 'tab', io: 'socket', grip: 'grip' } as const
@@ -43,25 +45,27 @@ function stateOf(a: Atom): string {
   }
 }
 
-export function Inspector({ atom, graph, onPatch, onRotate, onDelete, onPinMolecule }: Props) {
+export function Inspector({ atom, graph, onPatch, onRotate, onDelete, onPinMolecule, turnsLeft }: Props) {
   return (
     <aside className="panel inspector">
       <header className="panel-head">
         <span className="panel-title">{atom ? 'Inspector' : 'Field Guide'}</span>
         <span className="panel-sub">{atom ? DEFS[atom.kind].category : 'how matter behaves here'}</span>
       </header>
-      <div className="inspector-scroll">{atom ? <AtomDetails atom={atom} graph={graph} {...{ onPatch, onRotate, onDelete, onPinMolecule }} /> : <FieldGuide />}</div>
+      <div className="inspector-scroll">{atom ? <AtomDetails atom={atom} graph={graph} {...{ onPatch, onRotate, onDelete, onPinMolecule, turnsLeft }} /> : <FieldGuide />}</div>
     </aside>
   )
 }
 
-function AtomDetails({ atom, graph, onPatch, onRotate, onDelete, onPinMolecule }: Props & { atom: Atom }) {
+function AtomDetails({ atom, graph, onPatch, onRotate, onDelete, onPinMolecule, turnsLeft }: Props & { atom: Atom }) {
   const def = DEFS[atom.kind]
   const links = graph.links.get(atom.id) ?? []
   const molIndex = graph.molOf.get(atom.id)
   const mol = molIndex === undefined ? [atom.id] : graph.molecules[molIndex]
   const molAtoms = mol.map((id) => graph.byId.get(id)!).filter(Boolean)
   const molPinned = molAtoms.some((a) => a.pinned)
+  const molLocked = molAtoms.some((a) => a.lock)
+  const lock = atom.lock
   const counts = new Map<AtomKind, number>()
   for (const a of molAtoms) counts.set(a.kind, (counts.get(a.kind) ?? 0) + 1)
 
@@ -86,24 +90,43 @@ function AtomDetails({ atom, graph, onPatch, onRotate, onDelete, onPinMolecule }
 
       <p className="blurb">{def.blurb}</p>
 
-      <div className="btn-row">
-        <button className="btn" onClick={() => onRotate(atom.id)}>
-          ⟳ Rotate <kbd>R</kbd>
-        </button>
-        <button className={`btn${atom.pinned ? ' active' : ''}`} onClick={() => onPatch(atom.id, { pinned: !atom.pinned })}>
-          ◉ {atom.pinned ? 'Pinned' : 'Pin'} <kbd>P</kbd>
-        </button>
-        <button className="btn danger" onClick={() => onDelete(atom.id)}>
-          ✕ <kbd>Del</kbd>
-        </button>
-      </div>
+      {lock && (
+        <p className="lock-note">
+          {lock === 'turn'
+            ? `Part of the challenge. You can turn it either way but not move it. ${turnsLeft ?? 0} turn${turnsLeft === 1 ? '' : 's'} left; turning a piece back gives its turns back.`
+            : atom.kind === 'spark'
+              ? 'Part of the challenge. You can flip it, but not move it.'
+              : 'Part of the challenge: fixed in place.'}
+        </p>
+      )}
+
+      {lock !== 'fixed' && (
+        <div className="btn-row">
+          <button className="btn" onClick={() => onRotate(atom.id)} title="Rotate 60° clockwise (R)">
+            ⟳ <kbd>R</kbd>
+          </button>
+          <button className="btn" onClick={() => onRotate(atom.id, -1)} title="Rotate 60° back (Shift+R)">
+            ⟲ <kbd>⇧R</kbd>
+          </button>
+          {!lock && (
+            <button className={`btn${atom.pinned ? ' active' : ''}`} onClick={() => onPatch(atom.id, { pinned: !atom.pinned })}>
+              ◉ {atom.pinned ? 'Pinned' : 'Pin'} <kbd>P</kbd>
+            </button>
+          )}
+          {!lock && (
+            <button className="btn danger" onClick={() => onDelete(atom.id)}>
+              ✕ <kbd>Del</kbd>
+            </button>
+          )}
+        </div>
+      )}
 
       {atom.kind === 'spark' && (
         <button className={`btn wide toggle-btn${atom.on ? ' active' : ''}`} onClick={() => onPatch(atom.id, { on: !atom.on, out: !atom.on })}>
           {atom.on ? 'Switch OFF' : 'Switch ON'}
         </button>
       )}
-      {atom.kind === 'pulsar' && (
+      {!lock && atom.kind === 'pulsar' && (
         <label className="slider">
           <span>
             Period <b>{atom.period ?? 8} ticks</b>
@@ -111,7 +134,7 @@ function AtomDetails({ atom, graph, onPatch, onRotate, onDelete, onPinMolecule }
           <input type="range" min={2} max={32} step={2} value={atom.period ?? 8} onChange={(e) => onPatch(atom.id, { period: +e.target.value })} />
         </label>
       )}
-      {isForce(atom.kind) && (
+      {!lock && isForce(atom.kind) && (
         <label className="slider">
           <span>
             Field radius <b>{atom.radius ?? 5} cells</b>
@@ -119,7 +142,7 @@ function AtomDetails({ atom, graph, onPatch, onRotate, onDelete, onPinMolecule }
           <input type="range" min={2} max={10} value={atom.radius ?? 5} onChange={(e) => onPatch(atom.id, { radius: +e.target.value })} />
         </label>
       )}
-      {atom.kind === 'oculus' && (
+      {!lock && atom.kind === 'oculus' && (
         <label className="slider">
           <span>
             Sight range <b>{atom.radius ?? 4} cells</b>
@@ -127,7 +150,7 @@ function AtomDetails({ atom, graph, onPatch, onRotate, onDelete, onPinMolecule }
           <input type="range" min={1} max={8} value={atom.radius ?? 4} onChange={(e) => onPatch(atom.id, { radius: +e.target.value })} />
         </label>
       )}
-      {atom.kind === 'chronon' && (
+      {!lock && atom.kind === 'chronon' && (
         <label className="slider">
           <span>
             Delay <b>{atom.delay ?? 4} ticks</b>
@@ -135,7 +158,7 @@ function AtomDetails({ atom, graph, onPatch, onRotate, onDelete, onPinMolecule }
           <input type="range" min={1} max={16} value={atom.delay ?? 4} onChange={(e) => onPatch(atom.id, { delay: +e.target.value, mem: 0 })} />
         </label>
       )}
-      {atom.kind === 'quanta' && (
+      {!lock && atom.kind === 'quanta' && (
         <label className="slider">
           <span>
             Fire chance <b>{Math.round((atom.chance ?? 0.5) * 100)}%</b>
@@ -143,7 +166,7 @@ function AtomDetails({ atom, graph, onPatch, onRotate, onDelete, onPinMolecule }
           <input type="range" min={0} max={1} step={0.01} value={atom.chance ?? 0.5} onChange={(e) => onPatch(atom.id, { chance: +e.target.value })} />
         </label>
       )}
-      {atom.kind === 'entangler' && (
+      {!lock && atom.kind === 'entangler' && (
         <div className="slider">
           <span>Channel</span>
           <div className="seg channels">
@@ -200,9 +223,11 @@ function AtomDetails({ atom, graph, onPatch, onRotate, onDelete, onPinMolecule }
         <p className="muted small">
           {molPinned ? 'Pinned: force fields cannot move it.' : 'Free: it drifts in force fields and snaps onto whatever fits.'}
         </p>
-        <button className="btn wide" onClick={() => onPinMolecule(atom.id, !molPinned)}>
-          {molPinned ? 'Release molecule' : 'Pin whole molecule'}
-        </button>
+        {!molLocked && (
+          <button className="btn wide" onClick={() => onPinMolecule(atom.id, !molPinned)}>
+            {molPinned ? 'Release molecule' : 'Pin whole molecule'}
+          </button>
+        )}
       </section>
     </div>
   )
@@ -279,7 +304,7 @@ function FieldGuide() {
           <dt>Shift+Drag</dt>
           <dd>move whole molecule</dd>
           <dt>R · Right-click</dt>
-          <dd>rotate 60°</dd>
+          <dd>rotate 60° (Shift: back)</dd>
           <dt>Click Spark</dt>
           <dd>toggle it</dd>
           <dt>Drag off field</dt>

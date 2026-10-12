@@ -105,6 +105,7 @@ export function bodyKey(atom: Atom, opts: ArtOptions = {}): string {
     atom.out ? 1 : 0,
     atom.on ? 1 : 0,
     atom.pinned ? 1 : 0,
+    atom.lock ?? '',
     // Internal state (Chronon history, transmit flags) is not drawn, so it stays out of the key;
     // the one visible bit, a Mnemon's, is part of its caption.
     captionOf(atom),
@@ -170,6 +171,7 @@ export function bodyArt(atom: Atom, opts: ArtOptions = {}): Shape[] {
   const ports = [0, 1, 2, 3, 4, 5].map((side) => portAt(atom, side))
 
   if (atom.kind === 'conduit') return conduitBody(atom, c, live)
+  if (atom.kind === 'bedrock') return bedrockBody(atom)
 
   // ── Under the body ──────────────────────────────────────────────
   if (atom.kind === 'lumen' && live) S.push({ t: 'halo', r: CELL * 1.5, color: '#ffe680', alpha: 0.55 })
@@ -294,7 +296,29 @@ export function bodyArt(atom: Atom, opts: ArtOptions = {}): Shape[] {
     S.push({ t: 'text', x: 0, y: 14, text: captionOf(atom), size: 6, color: c, alpha: 0.7, font: 'mono', anchor: 'middle', spacing: 0.8 })
   }
 
-  if (atom.pinned) S.push(...pin(0, 25))
+  S.push(...badge(atom, 0, 25))
+  return S
+}
+
+/** Lock badges for challenge fixtures take the pin's spot; a fixture is pinned anyway. */
+function badge(atom: Atom, x: number, y: number): Shape[] {
+  if (atom.lock === 'fixed') return padlock(x, y)
+  if (atom.lock === 'turn') return turnMark(x, y)
+  return atom.pinned ? pin(x, y) : []
+}
+
+function bedrockBody(atom: Atom): Shape[] {
+  const d = hexPath(H)
+  const S: Shape[] = [
+    { t: 'path', d, p: { fill: '#1a2032', stroke: '#3b4560', width: 1.6 } },
+    { t: 'path', d: hexPath(H - 6), p: { fill: '#232a40' } },
+    // A few cracks and pebbles so walls read as rock, not as dead atoms.
+    { t: 'path', d: 'M -14 -12 L -5 -4 L -8 6 M -5 -4 L 6 -9 M 9 4 L 15 12 L 8 18', p: { stroke: '#11162a', width: 2 } },
+    { t: 'circle', x: 10, y: -14, r: 2.6, p: { fill: '#3b4560' } },
+    { t: 'circle', x: -12, y: 14, r: 2, p: { fill: '#3b4560' } },
+    { t: 'circle', x: 3, y: 10, r: 1.6, p: { fill: '#3b4560' } },
+  ]
+  if (atom.lock === 'turn' || atom.pinned === false) S.push(...badge(atom, 0, 25))
   return S
 }
 
@@ -309,7 +333,7 @@ function conduitBody(atom: Atom, c: string, live: boolean): Shape[] {
   if (live) S.push({ t: 'halo', r: CELL * 0.6, color: SIGNAL, alpha: 0.18 })
   S.push({ t: 'path', d: hexPath(13), p: { fill: live ? SIGNAL : c, stroke: INK, width: 2 }, glow: live })
   S.push({ t: 'text', x: 0, y: 0.5, text: 'Cu', size: 8, color: '#08101f', font: 'display', anchor: 'middle' })
-  if (atom.pinned) S.push(...pin(11, -11))
+  S.push(...badge(atom, 11, -11))
   return S
 }
 
@@ -370,6 +394,24 @@ function forceChevrons(inward: boolean, rot: number, c: string, live: boolean): 
     const [bx, by] = sidePoint(s, 4, base - H)
     return { t: 'path', d: `M ${ax} ${ay} L ${tx} ${ty} L ${bx} ${by}`, p: { stroke: c, strokeAlpha: live ? 1 : 0.45, width: 2 }, glow: live } as Shape
   })
+}
+
+function padlock(x: number, y: number): Shape[] {
+  const paint = { stroke: '#c9d4f2', strokeAlpha: 0.75, width: 1.3 }
+  return [
+    { t: 'circle', x, y, r: 6, p: { fill: INK, stroke: '#9fb0d8', strokeAlpha: 0.5, width: 1 } },
+    { t: 'path', d: `M ${x - 2.2} ${y - 0.5} L ${x - 2.2} ${y - 2.4} A 2.2 2.2 0 0 1 ${x + 2.2} ${y - 2.4} L ${x + 2.2} ${y - 0.5}`, p: paint },
+    { t: 'rect', x: x - 3.2, y: y - 0.8, w: 6.4, h: 4.6, rx: 1, p: { fill: '#c9d4f2', fillAlpha: 0.75 } },
+  ]
+}
+
+function turnMark(x: number, y: number): Shape[] {
+  const paint = { stroke: '#ffe14d', strokeAlpha: 0.9, width: 1.4 }
+  return [
+    { t: 'circle', x, y, r: 6, p: { fill: INK, stroke: '#ffe14d', strokeAlpha: 0.5, width: 1 } },
+    { t: 'path', d: `M ${x + 3} ${y - 1.5} A 3.3 3.3 0 1 0 ${x + 2.4} ${y + 2.4}`, p: paint },
+    { t: 'path', d: `M ${x + 1} ${y - 2.6} L ${x + 3.4} ${y - 1.4} L ${x + 3.8} ${y - 4}`, p: paint },
+  ]
 }
 
 function pin(x: number, y: number): Shape[] {

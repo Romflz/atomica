@@ -35,6 +35,7 @@ import {
 import type { RendererPreference } from 'pixi.js'
 import { atomArt, bodyArt, bodyKey, sideParts, sidesFor } from '../render/art'
 import type { Anim, Part, Shape } from '../render/art'
+import type { Zone } from '../game/challenge'
 import { boardOutline, boardSize, CELL, cellCenter, H, HEX_R, hexCorners } from '../render/geometry'
 import { isForce } from '../sim/atoms'
 import type { Note } from '../sim/demos'
@@ -62,6 +63,8 @@ export interface FieldScene {
   showFields: boolean
   resizePreview: { cols: number; rows: number } | null
   moveMs: number
+  /** Challenge goal and build areas. */
+  zones: Zone[]
 }
 
 type ShapeNoText = Exclude<Shape, { t: 'text' } | { t: 'halo' }>
@@ -154,6 +157,7 @@ export class FieldRenderer {
 
   private root = new Container()
   private boardLayer = new Container()
+  private zoneLayer = new Container()
   private noteLayer = new Container()
   private fieldLayer = new Container()
   private atomLayer = new Container()
@@ -190,6 +194,8 @@ export class FieldRenderer {
   private res = 1
   private boardSize = ''
   private notesRef: Note[] | null = null
+  private zonesRef: Zone[] | null = null
+  private goalGfx: Graphics | null = null
   private ghostRef: Ghost | null = null
   private bondKeys = new Set<string>()
   private destroyed = false
@@ -248,7 +254,7 @@ export class FieldRenderer {
     // Pan and zoom move this one group on the GPU instead of re-deriving every atom's transform.
     this.root.isRenderGroup = true
     this.app.stage.addChild(this.root)
-    this.root.addChild(this.boardLayer, this.noteLayer, this.fieldLayer, this.atomLayer, this.fxLayer, this.ghostLayer, this.uiLayer)
+    this.root.addChild(this.boardLayer, this.zoneLayer, this.noteLayer, this.fieldLayer, this.atomLayer, this.fxLayer, this.ghostLayer, this.uiLayer)
     this.boardLayer.addChild(this.board, this.boardMask, this.edge)
     this.uiLayer.addChild(this.hoverBox, this.reticle, this.resizeGfx, this.resizeLabel)
 
@@ -292,6 +298,7 @@ export class FieldRenderer {
 
     if (`${world.cols}x${world.rows}` !== this.boardSize) this.drawBoard(world.cols, world.rows)
     if (scene.notes !== this.notesRef) this.drawNotes(scene.notes)
+    if (scene.zones !== this.zonesRef) this.drawZones(scene.zones)
 
     const sides = sidesFor(graph)
     const selectedMol = new Set<string>()
@@ -615,6 +622,20 @@ export class FieldRenderer {
     }
   }
 
+  private drawZones(zones: Zone[]) {
+    this.zonesRef = zones
+    this.zoneLayer.removeChildren().forEach((c) => c.destroy())
+    this.goalGfx = null
+    for (const z of zones) {
+      const color = z.kind === 'goal' ? '#4dffa0' : '#38e8ff'
+      const g = new Graphics()
+      for (const [x, y] of z.cells) g.poly(hexCorners(HEX_R - 1.5, ...cellCenter(x, y)).flat()).fill({ color, alpha: z.kind === 'goal' ? 0.16 : 0.08 })
+      for (const [x, y] of z.cells) g.poly(hexCorners(HEX_R - 1.5, ...cellCenter(x, y)).flat()).stroke({ width: 1.5, color, alpha: 0.35, join: 'round' })
+      this.zoneLayer.addChild(g)
+      if (z.kind === 'goal') this.goalGfx = g
+    }
+  }
+
   private drawGhost(ghost: Ghost | null) {
     this.ghostRef = ghost
     this.ghostLayer.removeChildren().forEach((c) => c.destroy({ children: true }))
@@ -753,6 +774,9 @@ export class FieldRenderer {
         }
       }
     }
+
+    // Goal zones breathe so they read as targets.
+    if (this.goalGfx) this.goalGfx.alpha = 0.75 + 0.25 * Math.sin(t * 2.4)
 
     for (const n of this.animated) {
       const spin = n.anims.spin

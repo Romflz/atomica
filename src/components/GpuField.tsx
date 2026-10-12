@@ -18,7 +18,7 @@ interface Props {
   hostRef: RefObject<HTMLDivElement | null>
   preference: RendererPreference
   onAtomPointerDown: (atom: Atom, e: PointerEvent) => void
-  onAtomContextMenu: (atom: Atom) => void
+  onAtomContextMenu: (atom: Atom, e: MouseEvent) => void
   onBackgroundPointerDown: (e: PointerEvent) => void
   onResizeHandleDown: (e: PointerEvent) => void
   onInfo: (info: RendererInfo) => void
@@ -102,7 +102,7 @@ export function GpuField({ scene, view, hostRef, preference, onAtomPointerDown, 
     const menu = (e: MouseEvent) => {
       e.preventDefault()
       const { atom } = locate(e)
-      if (atom) latest.current.onAtomContextMenu(atom)
+      if (atom) latest.current.onAtomContextMenu(atom, e)
     }
     host.addEventListener('pointerdown', down)
     host.addEventListener('pointermove', move)

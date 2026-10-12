@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import type { ReactNode } from 'react'
 import { MAX_SIZE, MIN_SIZE, SCENES, SIZE_PRESETS } from '../sim/demos'
 import type { Size } from '../sim/demos'
 
@@ -21,6 +22,9 @@ interface Props {
   size: Size
   backend: string
   preferWebGL: boolean
+  /** Set while a challenge is loaded: its title, and the controls it locks. */
+  challengeTitle: string | null
+  end: ReactNode
   onToggleRun: () => void
   onStep: () => void
   onTps: (tps: number) => void
@@ -58,15 +62,18 @@ export function TopBar(p: Props) {
           {p.running ? '❚❚ Pause' : '▶ Run'}
         </button>
         <button className="btn" onClick={p.onStep} disabled={p.running} title="Step one tick (.)">
-          ⏭ Step
+          ⏭<span className="lbl"> Step</span>
         </button>
         <label className="speed" title="Simulation speed (ticks per second)">
           <span>{p.tps} t/s</span>
           <input type="range" min={1} max={30} value={p.tps} onChange={(e) => p.onTps(+e.target.value)} />
         </label>
-        <label className={`speed heat${p.heat > 0 ? ' warm' : ''}`} title="Heat: random thermal jiggle for unpinned molecules">
+        <label
+          className={`speed heat${p.heat > 0 ? ' warm' : ''}`}
+          title={p.challengeTitle ? 'Heat is fixed during a challenge' : 'Heat: random thermal jiggle for unpinned molecules'}
+        >
           <span>{p.heat > 0 ? `${Math.round(p.heat * 100)}°` : 'cold'}</span>
-          <input type="range" min={0} max={0.3} step={0.01} value={p.heat} onChange={(e) => p.onHeat(+e.target.value)} />
+          <input type="range" min={0} max={0.3} step={0.01} value={p.heat} disabled={!!p.challengeTitle} onChange={(e) => p.onHeat(+e.target.value)} />
         </label>
         <button
           className={`btn fields-btn${p.showFields ? ' active' : ''}`}
@@ -74,13 +81,14 @@ export function TopBar(p: Props) {
           title="Show or hide attraction / repulsion fields (V)"
           aria-pressed={p.showFields}
         >
-          ◎ Fields
+          ◎<span className="lbl"> Fields</span>
         </button>
       </div>
 
       <div className="scene-picker">
         <select value={p.sceneId} onChange={(e) => p.onScene(e.target.value)} title={scene?.hint}>
           {p.sceneId === 'custom' && <option value="custom">Your build</option>}
+          {p.sceneId === 'challenge' && <option value="challenge">◆ {p.challengeTitle}</option>}
           {SCENES.map((s) => (
             <option key={s.id} value={s.id}>
               {s.name}
@@ -88,7 +96,7 @@ export function TopBar(p: Props) {
           ))}
         </select>
         <button className="btn" onClick={() => p.onScene(p.sceneId === 'custom' ? 'empty' : p.sceneId)} title="Reload scene (reseeds the soup)">
-          ↺ {p.sceneId === 'custom' ? 'Clear' : 'Reload'}
+          ↺<span className="lbl"> {p.sceneId === 'custom' ? 'Clear' : p.sceneId === 'challenge' ? 'Restart' : 'Reload'}</span>
         </button>
         <SizeMenu size={p.size} backend={p.backend} preferWebGL={p.preferWebGL} onResize={p.onResize} onPreferWebGL={p.onPreferWebGL} />
         <ProjectMenu onExport={p.onExport} onImport={p.onImport} />
@@ -96,6 +104,8 @@ export function TopBar(p: Props) {
           ⤢
         </button>
       </div>
+
+      <div className="topbar-end">{p.end}</div>
 
     </header>
   )
@@ -123,7 +133,7 @@ function ProjectMenu({ onExport, onImport }: { onExport: () => void; onImport: (
   return (
     <div className="menu-anchor" ref={ref}>
       <button className={`btn${open ? ' active' : ''}`} onClick={() => setOpen((o) => !o)} title="Save or open a project file">
-        ⇅ Project
+        ⇅<span className="lbl"> Project</span>
       </button>
       {open && (
         <div className="popover project-pop">
