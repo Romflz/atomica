@@ -109,7 +109,8 @@ export function Codex({ progress, meter, sandbox, onClose, onReset }: CodexProps
               <div className="codex-grid">
                 {DISCOVERIES.filter((d) => d.tier === tier).map((d) => {
                   const done = !!progress.unlocked[d.id]
-                  const m = done ? null : meter(d)
+                  // Presets don't count toward sandbox discoveries, so don't show their progress there.
+                  const m = done || (d.sandbox && !sandbox) ? null : meter(d)
                   return (
                     <div key={d.id} className={`discovery${done ? ' done' : ''}`} style={{ ['--c' as string]: DEFS[d.icon].color }}>
                       <div className="discovery-icon">

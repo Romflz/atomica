@@ -3,7 +3,7 @@ import type { RefObject } from 'react'
 import type { RendererPreference } from 'pixi.js'
 import { FieldRenderer } from '../gpu/FieldRenderer'
 import type { FieldScene, View } from '../gpu/FieldRenderer'
-import { CELL } from '../render/geometry'
+import { boardSize, pixelToCell } from '../render/geometry'
 import { cellKey } from '../sim/engine'
 import type { Atom } from '../sim/types'
 
@@ -28,7 +28,7 @@ interface Props {
 const HANDLE_PX = 26
 
 /**
- * Hosts the GPU renderer. Input is resolved here against the grid (cell
+ * Hosts the GPU renderer. Input is resolved here against the hex grid (cell
  * lookup) rather than through Pixi hit-testing, which stays O(1) no matter
  * how many atoms are on the field.
  */
@@ -78,13 +78,11 @@ export function GpuField({ scene, view, hostRef, preference, onAtomPointerDown, 
       const rect = host.getBoundingClientRect()
       const sx = e.clientX - rect.left
       const sy = e.clientY - rect.top
-      const cornerX = v.x + s.world.cols * CELL * v.k
-      const cornerY = v.y + s.world.rows * CELL * v.k
-      const onHandle = Math.hypot(sx - cornerX, sy - cornerY) < HANDLE_PX
-      const cx = Math.floor((sx - v.x) / v.k / CELL)
-      const cy = Math.floor((sy - v.y) / v.k / CELL)
-      const inside = cx >= 0 && cy >= 0 && cx < s.world.cols && cy < s.world.rows
-      const id = inside ? s.graph.occ.get(cellKey(s.world, cx, cy)) : undefined
+      const board = boardSize(s.world.cols, s.world.rows)
+      const onHandle = Math.hypot(sx - (v.x + board.w * v.k), sy - (v.y + board.h * v.k)) < HANDLE_PX
+      const { x, y } = pixelToCell((sx - v.x) / v.k, (sy - v.y) / v.k)
+      const inside = x >= 0 && y >= 0 && x < s.world.cols && y < s.world.rows
+      const id = inside ? s.graph.occ.get(cellKey(s.world, x, y)) : undefined
       return { onHandle, atom: id ? s.graph.byId.get(id) : undefined }
     }
     const down = (e: PointerEvent) => {

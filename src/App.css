@@ -523,9 +523,9 @@ kbd {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
   grid-template-areas:
-    '. n .'
+    'nw . ne'
     'w c e'
-    '. s .';
+    'sw . se';
   gap: 4px;
 }
 .compass-cell {
@@ -551,17 +551,23 @@ kbd {
 .compass-cell.bonded {
   border-color: color-mix(in srgb, var(--c) 45%, transparent);
 }
-.side-N {
-  grid-area: n;
-}
 .side-E {
   grid-area: e;
 }
-.side-S {
-  grid-area: s;
+.side-SE {
+  grid-area: se;
+}
+.side-SW {
+  grid-area: sw;
 }
 .side-W {
   grid-area: w;
+}
+.side-NW {
+  grid-area: nw;
+}
+.side-NE {
+  grid-area: ne;
 }
 .compass-core {
   grid-area: c;

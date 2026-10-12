@@ -1,75 +1,35 @@
-# React + TypeScript + Vite
+# AtomForge
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+A molecular logic sandbox on a hex grid. Drag atoms onto the field; their six edges snap together like jigsaw pieces into rigid molecules that carry signals, feel force fields, move, see, eat and copy themselves.
 
-Currently, two official plugins are available:
-
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
-
-## React Compiler
-
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
-
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
-
+```sh
+pnpm install
+pnpm dev
 ```
 
-You can also install [eslint-plugin-react-x](https://npmx.dev/package/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://npmx.dev/package/eslint-plugin-react-dom) for React-specific lint rules:
+## How it works
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+- **Bonding:** every atom is a hexagon, and each of its six edges is a tab (output), slot (input), socket (conduit), grip or flat. Tabs fit slots, sockets and grips fit anything, and like never fits like. Bonded atoms form one rigid molecule.
+- **Signals:** charge flows from tabs into slots. Conduit chains share charge instantly, and every gate adds one tick of delay, so loops make clocks and memory. Gates take inputs on their three back edges and drive their front tab.
+- **Physics:** Magnetar and Repulsar fields act only on *other* molecules, so attract/repel pairs chase each other. Propulsors drive their molecule in any of six directions and Gyrons turn it 60° at a time. Heat jostles small molecules so new reactions keep happening.
+- **Life:** Oculi see, Devourers eat, Fabricators copy whatever they hold, and Clasps let go to split a molecule.
 
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+## Code map
 
+| Path | What |
+| --- | --- |
+| `src/sim/hex.ts` | Hex grid maths: neighbours, rotation, rounding (odd-r offset storage, axial maths) |
+| `src/sim/` | Pure simulation: atom definitions, bond graph, logic and physics step, preset scenes |
+| `src/render/` | Renderer-agnostic atom artwork and board geometry (shared by the GPU field and SVG icons) |
+| `src/gpu/FieldRenderer.ts` | PixiJS v8 field renderer (WebGPU, falls back to WebGL), atlas-baked sprites |
+| `src/game/progress.ts` | Discoveries, XP and levels |
+| `src/components/` | React UI: palette, inspector, top bar, Codex |
+
+## Deploy
+
+The game is a static Vite build, configured for Vercel in `vercel.ts` (Vite preset, `pnpm build`, output `dist`, long-lived caching for fingerprinted assets). Import the repo in Vercel, or from the CLI:
+
+```sh
+vercel deploy        # preview
+vercel deploy --prod # production
 ```

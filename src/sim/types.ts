@@ -1,5 +1,5 @@
-/** Sides are indexed clockwise from the top: 0 = N, 1 = E, 2 = S, 3 = W. */
-export type Side = 0 | 1 | 2 | 3
+/** Atoms sit on a pointy-top hex grid. Sides are indexed clockwise from east: 0 E, 1 SE, 2 SW, 3 W, 4 NW, 5 NE. */
+export type Side = 0 | 1 | 2 | 3 | 4 | 5
 
 /**
  * A port is the shape on one side of an atom.
@@ -36,9 +36,10 @@ export type AtomKind =
 export interface Atom {
   id: string
   kind: AtomKind
+  /** Hex column and row ("odd-r" offset: odd rows sit half a cell to the right). */
   x: number
   y: number
-  /** Quarter turns clockwise, 0..3. Directional atoms face their canonical north. */
+  /** Sixths of a turn clockwise, 0..5. Directional atoms face their canonical east side. */
   rot: number
   /** Pinned molecules ignore fields, heat, thrust and predators. */
   pinned: boolean

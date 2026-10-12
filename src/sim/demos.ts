@@ -1,4 +1,5 @@
 import { makeAtom } from './atoms'
+import { cellAt, centerOf, neighbor, translate, turnDelta } from './hex'
 import type { Atom, AtomKind, World } from './types'
 
 export interface Note {
@@ -17,31 +18,41 @@ export interface Size {
   rows: number
 }
 
-export const DEFAULT_SIZE: Size = { cols: 36, rows: 22 }
+// Hex rows are only √3/2 of a cell apart, so fields get a few more rows than columns would suggest.
+export const DEFAULT_SIZE: Size = { cols: 36, rows: 26 }
 
 export const SIZE_PRESETS: { name: string; cols: number; rows: number }[] = [
-  { name: 'Petri', cols: 24, rows: 16 },
-  { name: 'Lab', cols: 36, rows: 22 },
-  { name: 'Arena', cols: 60, rows: 36 },
-  { name: 'Biome', cols: 100, rows: 60 },
-  { name: 'Colossal', cols: 200, rows: 120 },
+  { name: 'Petri', cols: 24, rows: 18 },
+  { name: 'Lab', cols: 36, rows: 26 },
+  { name: 'Arena', cols: 60, rows: 42 },
+  { name: 'Biome', cols: 100, rows: 70 },
+  { name: 'Colossal', cols: 200, rows: 140 },
 ]
 export const MIN_SIZE = { cols: 8, rows: 6 }
-export const MAX_SIZE = { cols: 240, rows: 150 }
+export const MAX_SIZE = { cols: 240, rows: 170 }
 
 export const emptyWorld = (size: Size = DEFAULT_SIZE, heat = 0): World => ({ ...size, tick: 0, atoms: [], heat })
 
-/** [kind, x, y, rot?, extra?] relative to a stamp origin. */
+/**
+ * [kind, q, r, rot?, extra?]. In a blueprint, (q, r) is an axial offset from
+ * the blueprint's anchor; after `stamp` it is an absolute cell (column, row).
+ */
 type Spec = [AtomKind, number, number, number?, Partial<Atom>?]
 
-/** Rotate a relative blueprint by quarter turns clockwise and place it at (ox, oy). */
+/** Place a blueprint at cell (ox, oy), turned `turns` sixths of a turn clockwise. */
 function stamp(specs: Spec[], ox: number, oy: number, turns = 0, extra: Partial<Atom> = {}): Spec[] {
-  return specs.map(([k, x, y, rot = 0, e = {}]) => {
-    let dx = x
-    let dy = y
-    for (let i = 0; i < turns; i++) [dx, dy] = [-dy, dx]
-    return [k, ox + dx, oy + dy, (rot + turns) % 4, { ...extra, ...e }]
+  return specs.map(([k, q, r, rot = 0, e = {}]) => {
+    let [dq, dr] = [q, r]
+    for (let i = 0; i < turns; i++) [dq, dr] = turnDelta(dq, dr)
+    const [x, y] = translate(ox, oy, dq, dr)
+    return [k, x, y, (rot + turns) % 6, { ...extra, ...e }]
   })
+}
+
+/** The absolute cell at an axial offset from an anchor, for placing notes beside blueprints. */
+const cellNear = (ox: number, oy: number, q: number, r: number) => {
+  const [x, y] = translate(ox, oy, q, r)
+  return { x, y }
 }
 
 const build = (specs: Spec[], pinned = false): Atom[] =>
@@ -58,58 +69,80 @@ function mulberry(seed: number) {
   }
 }
 
+/** A cell and its six neighbours. */
+const around = (x: number, y: number) => [[x, y], ...[0, 1, 2, 3, 4, 5].map((s) => neighbor(x, y, s))]
+
 /** Scatter loose atoms on free cells, keeping a one-cell moat around everything already placed. */
 function scatter(specs: Spec[], size: Size, n: number, kinds: AtomKind[], seed: number, extra: Partial<Atom> = {}) {
   const rand = mulberry(seed)
   const taken = new Set(specs.map(([, x, y]) => `${x},${y}`))
-  const near = (x: number, y: number) => [-1, 0, 1].some((dx) => [-1, 0, 1].some((dy) => taken.has(`${x + dx},${y + dy}`)))
+  const near = (x: number, y: number) => around(x, y).some(([nx, ny]) => taken.has(`${nx},${ny}`))
   let placed = 0
   for (let tries = 0; placed < n && tries < n * 60; tries++) {
     const x = 1 + Math.floor(rand() * (size.cols - 2))
     const y = 1 + Math.floor(rand() * (size.rows - 2))
     if (near(x, y)) continue
     taken.add(`${x},${y}`)
-    specs.push([kinds[Math.floor(rand() * kinds.length)], x, y, Math.floor(rand() * 4), extra])
+    specs.push([kinds[Math.floor(rand() * kinds.length)], x, y, Math.floor(rand() * 6), extra])
     placed++
   }
 }
 
-// ── Blueprints (drawn facing north; stamp() rotates them) ───────────
+// ── Blueprints (drawn facing east; stamp() turns them) ──────────────
 
-/** Spark-powered thruster that turns at random: Quanta pulses a Gyron. */
+/** Spark-powered thruster that turns at random: a Quanta pulses a Gyron. */
 const WANDERER = (chance = 0.12): Spec[] => [
-  ['spark', -1, 0, 0, { on: true }],
   ['propulsor', 0, 0],
-  ['gyron', 1, 0],
-  ['quanta', 1, -1, 0, { chance }],
+  ['spark', 0, -1, 0, { on: true }],
+  ['gyron', -1, 1, 1],
+  ['quanta', 0, 1, 0, { chance }],
 ]
 
 /**
- * Hunter, nine atoms with a tiny brain:
+ * Hunter, sixteen atoms with a tiny brain:
  *  - the Oculus looks forward through its own Devourer;
- *  - seeing fires the Propulsor directly, and the mouth via two Orium relays
- *    (their exposed sides are slots, which Lumen plankton cannot stick to);
+ *  - seeing fires the Propulsor, so it charges at whatever it spots;
+ *  - an unfed Negon is a battery that keeps the mouth hungry;
  *  - a Gyron turns it at random, but only while nothing is in view:
- *    Gyron = Quanta AND NOT(seeing).
+ *    Gyron = Quanta AND NOT(seeing);
+ *  - eight Lumen photophores cap every tab and grip on its skin, so drifting
+ *    plankton has nothing to stick to. They glow while it hunts and flicker
+ *    with its random impulses.
  */
 const PREDATOR: Spec[] = [
-  ['devourer', 0, 0],
-  ['or', 1, 0, 2],
-  ['oculus', 0, 1, 0, { radius: 8 }],
-  ['or', 1, 1, 3],
+  ['oculus', 0, 0, 0, { radius: 8 }],
+  ['devourer', 1, 0],
   ['propulsor', -1, 1],
-  ['not', 0, 2, 1],
-  ['and', 0, 3],
-  ['quanta', -1, 3, 0, { chance: 0.2 }],
-  ['gyron', 1, 3, 1],
+  ['not', 1, -1, 5],
+  ['and', 2, -2],
+  ['gyron', 3, -2],
+  ['quanta', 1, -2, 0, { chance: 0.2 }],
+  ['not', 2, -1, 2],
+  ['lumen', 0, 1],
+  ['lumen', -1, 0],
+  ['lumen', 0, -1],
+  ['lumen', 4, -2],
+  ['lumen', 3, -3],
+  ['lumen', 0, -2],
+  ['lumen', 1, -3],
+  ['lumen', 2, -3],
 ]
 
-/** A pinned printer: a Pulsar clocks a Fabricator copying the Lumen it holds. */
+/**
+ * A pinned printer: a Pulsar clocks a Fabricator copying the Lumen it holds.
+ * Lumens cap the Pulsar's spare tabs (and blink with it), so drifting
+ * plankton has nothing to stick to.
+ */
 const FACTORY = (period = 6): Spec[] => [
   ['fabricator', 0, 0],
-  ['lumen', 0, 1],
-  ['pulsar', -1, 0, 0, { period }],
-  ['repulsar', 0, -3, 0, { radius: 3 }],
+  ['lumen', -1, 0],
+  ['pulsar', 0, -1, 0, { period }],
+  ['lumen', 1, -1],
+  ['lumen', 1, -2],
+  ['lumen', 0, -2],
+  ['lumen', -1, -1],
+  // Keeps the output clear so the printer never jams.
+  ['repulsar', 3, 0, 0, { radius: 3 }],
 ]
 
 /** Three Repulsars held by a Clasp; a Pulsar via a Negon opens it after `period / 2` ticks. */
@@ -118,142 +151,193 @@ const SPORE = (period: number): Spec[] => [
   ['not', -1, 0],
   ['clasp', 0, 0],
   ['repulsar', 1, 0, 0, { radius: 4 }],
-  ['repulsar', 0, -1, 3, { radius: 4 }],
   ['repulsar', 0, 1, 1, { radius: 4 }],
+  ['repulsar', 1, -1, 5, { radius: 4 }],
+]
+
+/** Two sparks feeding a 2-input gate through its back slots, wired out to a lamp. */
+const GATE_BENCH = (kind: AtomKind, a: boolean, b: boolean): Spec[] => [
+  ['spark', 0, -2, 0, { on: a }],
+  ['conduit', 0, -1],
+  [kind, 0, 0],
+  ['conduit', -1, 1],
+  ['spark', -2, 2, 0, { on: b }],
+  ['conduit', 1, 0],
+  ['conduit', 2, 0],
+  ['lumen', 3, 0],
+]
+
+/**
+ * Half adder. A and B each reach both gates without their wires touching:
+ * B runs straight down between the gates, A loops around the outside.
+ */
+const HALF_ADDER: Spec[] = [
+  ['xor', 0, 0],
+  ['and', -2, 4],
+  // B: down the middle, from Xorium's lower slot to Andium's upper slot.
+  ['spark', 0, 2, 0, { on: false }],
+  ['conduit', -1, 1],
+  ['conduit', -1, 2],
+  ['conduit', -2, 3],
+  // A: from Xorium's upper slot, round the left, into Andium's lower slot.
+  ['spark', -5, 3, 0, { on: true }],
+  ['conduit', 0, -1],
+  ['conduit', -1, -1],
+  ['conduit', -2, 0],
+  ['conduit', -3, 1],
+  ['conduit', -3, 2],
+  ['conduit', -4, 3],
+  ['conduit', -4, 4],
+  ['conduit', -4, 5],
+  ['conduit', -3, 5],
+  // Sum and carry out to lamps.
+  ['conduit', 1, 0],
+  ['conduit', 2, 0],
+  ['lumen', 3, 0],
+  ['conduit', -1, 4],
+  ['conduit', 0, 4],
+  ['lumen', 1, 4],
 ]
 
 // ── Scenes ──────────────────────────────────────────────────────────
 
-/** Two sparks feeding a 2-input gate, wired out to a lamp. */
-function gateBench(kind: AtomKind, gx: number, gy: number, a: boolean, b: boolean): Spec[] {
-  return [
-    ['spark', gx, gy - 2, 0, { on: a }],
-    ['conduit', gx, gy - 1],
-    [kind, gx, gy],
-    ['conduit', gx, gy + 1],
-    ['spark', gx, gy + 2, 0, { on: b }],
-    ['conduit', gx + 1, gy],
-    ['conduit', gx + 2, gy],
-    ['lumen', gx + 3, gy],
-  ]
-}
-
 function logicLab(): Scene {
   const specs: Spec[] = [
-    ...gateBench('and', 3, 4, true, true),
-    ...gateBench('or', 10, 4, true, false),
-    ...gateBench('xor', 17, 4, true, true),
+    ...stamp(GATE_BENCH('and', true, true), 5, 4),
+    ...stamp(GATE_BENCH('or', true, false), 13, 4),
+    ...stamp(GATE_BENCH('xor', true, true), 21, 4),
 
     // Clock and its inverse.
-    ['pulsar', 3, 11],
-    ['conduit', 4, 11],
-    ['conduit', 5, 11],
-    ['not', 6, 11],
-    ['conduit', 7, 11],
-    ['lumen', 8, 11],
-    ['conduit', 4, 12],
-    ['lumen', 4, 13],
+    ...stamp(
+      [
+        ['pulsar', 0, 0],
+        ['conduit', 1, 0],
+        ['conduit', 2, 0],
+        ['not', 3, 0],
+        ['conduit', 4, 0],
+        ['lumen', 5, 0],
+        ['conduit', 1, 1],
+        ['lumen', 1, 2],
+      ],
+      2,
+      12,
+    ),
 
     // Ring oscillator: a Negon fed its own output.
-    ['not', 12, 11],
-    ['conduit', 13, 11],
-    ['conduit', 13, 12],
-    ['conduit', 12, 12],
-    ['conduit', 11, 12],
-    ['conduit', 11, 11],
-    ['lumen', 14, 11],
+    ...stamp(
+      [
+        ['not', 0, 0],
+        ['conduit', 1, 0],
+        ['conduit', 1, -1],
+        ['conduit', 0, -1],
+        ['conduit', -1, 0],
+        ['lumen', 2, 0],
+      ],
+      13,
+      12,
+    ),
 
-    // Half adder: A and B into Xorium (sum) and Andium (carry).
-    ['spark', 24, 12, 0, { on: true }],
-    ['conduit', 25, 9],
-    ['conduit', 25, 10],
-    ['conduit', 25, 11],
-    ['conduit', 25, 12],
-    ['conduit', 25, 13],
-    ['conduit', 25, 14],
-    ['conduit', 25, 15],
-    ['conduit', 26, 9],
-    ['conduit', 27, 9],
-    ['conduit', 26, 15],
-    ['conduit', 27, 15],
-    ['xor', 27, 10],
-    ['and', 27, 14],
-    ['spark', 28, 12, 0, { on: false }],
-    ['conduit', 27, 11],
-    ['conduit', 27, 12],
-    ['conduit', 27, 13],
-    ['conduit', 28, 10],
-    ['conduit', 29, 10],
-    ['lumen', 30, 10],
-    ['conduit', 28, 14],
-    ['conduit', 29, 14],
-    ['lumen', 30, 14],
+    ...stamp(HALF_ADDER, 29, 11),
 
     // Wireless: a Spark into one Entanglon lights a lamp on its twin.
-    ['spark', 2, 19, 0, { on: true }],
-    ['entangler', 3, 19],
-    ['entangler', 6, 19],
-    ['lumen', 7, 19],
+    ...stamp(
+      [
+        ['spark', 0, 0, 0, { on: true }],
+        ['entangler', 1, 0],
+        ['entangler', 4, 0],
+        ['lumen', 5, 0],
+      ],
+      2,
+      21,
+    ),
 
     // Memory: each time the Spark turns on, the stored bit flips.
-    ['spark', 11, 19],
-    ['mnemon', 12, 19],
-    ['lumen', 13, 19],
+    ...stamp(
+      [
+        ['spark', 0, 0],
+        ['mnemon', 1, 0],
+        ['lumen', 2, 0],
+      ],
+      11,
+      21,
+    ),
 
     // Delay line: the delayed lamp trails the direct one by 4 ticks.
-    ['pulsar', 17, 19, 0, { period: 16 }],
-    ['chronon', 18, 19, 0, { delay: 4 }],
-    ['lumen', 19, 19],
-    ['lumen', 17, 20],
+    ...stamp(
+      [
+        ['pulsar', 0, 0, 0, { period: 16 }],
+        ['chronon', 1, 0, 0, { delay: 4 }],
+        ['lumen', 2, 0],
+        ['lumen', -1, 1],
+      ],
+      18,
+      21,
+    ),
 
     // Noise.
-    ['quanta', 24, 19, 0, { chance: 0.35 }],
-    ['lumen', 25, 19],
+    ...stamp(
+      [
+        ['quanta', 0, 0, 0, { chance: 0.35 }],
+        ['lumen', 1, 0],
+      ],
+      26,
+      21,
+    ),
   ]
   return {
     world: { ...emptyWorld(), atoms: build(specs, true) },
     notes: [
-      { x: 3, y: 1, text: 'AND' },
+      { x: 2, y: 1, text: 'AND' },
       { x: 10, y: 1, text: 'OR' },
-      { x: 17, y: 1, text: 'XOR' },
-      { x: 3, y: 9, text: 'CLOCK + INVERSE' },
+      { x: 18, y: 1, text: 'XOR' },
+      { x: 2, y: 9, text: 'CLOCK + INVERSE' },
       { x: 11, y: 9, text: 'RING OSCILLATOR' },
-      { x: 24, y: 7, text: 'HALF ADDER' },
-      { x: 23, y: 12, text: 'A' },
-      { x: 29, y: 12, text: 'B' },
-      { x: 31, y: 10, text: 'SUM' },
-      { x: 31, y: 14, text: 'CARRY' },
-      { x: 2, y: 17, text: 'WIRELESS' },
-      { x: 10, y: 17, text: 'MEMORY' },
-      { x: 16, y: 17, text: 'DELAY' },
-      { x: 23, y: 17, text: 'NOISE' },
+      { x: 25, y: 9, text: 'HALF ADDER' },
+      { ...cellNear(29, 11, -6, 3), text: 'A' },
+      { ...cellNear(29, 11, 1, 2), text: 'B' },
+      { ...cellNear(29, 11, 4, 0), text: 'SUM' },
+      { ...cellNear(29, 11, 2, 4), text: 'CARRY' },
+      { x: 2, y: 19, text: 'WIRELESS' },
+      { x: 11, y: 19, text: 'MEMORY' },
+      { x: 17, y: 19, text: 'DELAY' },
+      { x: 25, y: 19, text: 'NOISE' },
     ],
   }
 }
 
+/**
+ * Eight Mnemons in a row. Each one's bit runs through a Negon into the next
+ * one's toggle slot, so a bit flips whenever the previous one falls. A reset
+ * bus runs above, dropping into every Mnemon's upper (reset) slot.
+ */
 function binaryCounter(): Scene {
   const bits = 8
-  const specs: Spec[] = [['pulsar', 2, 10, 0, { period: 4 }], ['spark', 1, 8]]
-  for (let x = 2; x <= 2 + bits * 3; x++) specs.push(['conduit', x, 8])
+  const bp: Spec[] = [
+    ['pulsar', -2, 1, 0, { period: 4 }],
+    // Relay: keeps the clock's tabs away from the reset bus.
+    ['or', -1, 0],
+    ['spark', -1, -2],
+  ]
+  for (let q = 0; q <= bits * 3 - 2; q++) bp.push(['conduit', q, -2])
   for (let i = 0; i < bits; i++) {
-    const x = 3 + i * 3
-    specs.push(['conduit', x, 9], ['mnemon', x, 10], ['conduit', x + 1, 10], ['lumen', x + 1, 11])
-    // Each bit toggles when the previous one falls: feed its inverse onward.
-    if (i < bits - 1) specs.push(['not', x + 2, 10])
+    const q = i * 3
+    bp.push(['conduit', q, -1], ['mnemon', q, 0], ['conduit', q + 1, 0], ['lumen', q + 1, 1])
+    if (i < bits - 1) bp.push(['not', q + 2, 0])
   }
+  const [ox, oy] = [3, 5]
   return {
-    world: { ...emptyWorld({ cols: 30, rows: 15 }), atoms: build(specs, true) },
+    world: { ...emptyWorld({ cols: 28, rows: 10 }), atoms: build(stamp(bp, ox, oy), true) },
     notes: [
-      { x: 2, y: 5, text: '8-BIT RIPPLE COUNTER' },
-      { x: 2, y: 13, text: 'LSB' },
-      { x: 24, y: 13, text: 'MSB' },
-      { x: 0, y: 7, text: 'RESET' },
+      { x: 2, y: 0, text: '8-BIT RIPPLE COUNTER' },
+      { ...cellNear(ox, oy, -1, 2), text: 'LSB' },
+      { ...cellNear(ox, oy, 21, 2), text: 'MSB' },
+      { ...cellNear(ox, oy, -3, -1), text: 'RESET' },
     ],
   }
 }
 
 function lightShow(): Scene {
-  const rows: [number, number, AtomKind][] = [
+  const lanes: [number, number, AtomKind][] = [
     [8, 1, 'pulsar'],
     [12, 1, 'pulsar'],
     [16, 2, 'pulsar'],
@@ -263,12 +347,10 @@ function lightShow(): Scene {
     [0, 1, 'quanta'],
   ]
   const specs: Spec[] = []
-  rows.forEach(([period, delay, src], r) => {
-    const y = 2 + r * 4
-    specs.push([src, 2, y, 0, src === 'pulsar' ? { period } : { chance: 0.3 }])
-    for (let i = 0; i < 20; i++) {
-      specs.push(['chronon', 3 + i * 2, y, 0, { delay }], ['conduit', 4 + i * 2, y], ['lumen', 4 + i * 2, y + 1])
-    }
+  lanes.forEach(([period, delay, src], lane) => {
+    const bp: Spec[] = [[src, 0, 0, 0, src === 'pulsar' ? { period } : { chance: 0.3 }]]
+    for (let i = 0; i < 20; i++) bp.push(['chronon', 1 + i * 2, 0, 0, { delay }], ['conduit', 2 + i * 2, 0], ['lumen', 2 + i * 2, 1])
+    specs.push(...stamp(bp, 2, 2 + lane * 4))
   })
   return {
     world: { ...emptyWorld({ cols: 46, rows: 30 }), atoms: build(specs, true) },
@@ -277,52 +359,51 @@ function lightShow(): Scene {
 }
 
 function wireless(): Scene {
+  // East neighbours share a row, so these pairs can use plain cell coordinates.
   const receiver = (x: number, y: number, ch: number): Spec[] => [
     ['entangler', x, y, 0, { channel: ch }],
     ['lumen', x + 1, y],
   ]
   const specs: Spec[] = [
-    ['spark', 16, 10, 0, { on: true }],
-    ['entangler', 17, 10, 0, { channel: 0 }],
-    ['pulsar', 16, 5, 0, { period: 10 }],
-    ['entangler', 17, 5, 0, { channel: 1 }],
-    ['quanta', 16, 15, 0, { chance: 0.3 }],
-    ['entangler', 17, 15, 0, { channel: 2 }],
+    ['spark', 16, 12, 0, { on: true }],
+    ['entangler', 17, 12, 0, { channel: 0 }],
+    ['pulsar', 16, 6, 0, { period: 10 }],
+    ['entangler', 17, 6, 0, { channel: 1 }],
+    ['quanta', 16, 18, 0, { chance: 0.3 }],
+    ['entangler', 17, 18, 0, { channel: 2 }],
     ...receiver(3, 3, 0),
     ...receiver(30, 3, 0),
-    ...receiver(3, 17, 0),
-    ...receiver(30, 17, 0),
+    ...receiver(3, 22, 0),
+    ...receiver(30, 22, 0),
     ...receiver(9, 2, 1),
-    ...receiver(24, 18, 1),
-    ...receiver(3, 10, 1),
+    ...receiver(24, 23, 1),
+    ...receiver(3, 12, 1),
     ...receiver(24, 2, 2),
-    ...receiver(9, 18, 2),
-    ...receiver(30, 10, 2),
-    // A remote-controlled memory: the channel-0 signal toggles a Mnemon far away.
-    ['entangler', 10, 10, 0, { channel: 0 }],
-    ['mnemon', 11, 10],
-    ['lumen', 12, 10],
+    ...receiver(9, 23, 2),
+    ...receiver(30, 12, 2),
+    // A remote-controlled memory: the Spark's channel toggles a Mnemon far away.
+    ['entangler', 10, 12, 0, { channel: 0 }],
+    ['mnemon', 11, 12],
+    ['lumen', 12, 12],
   ]
   return {
     world: { ...emptyWorld(), atoms: build(specs, true) },
     notes: [
-      { x: 14, y: 8, text: 'CLICK THE SPARK' },
-      { x: 19, y: 5, text: 'CH 2 · PULSAR' },
-      { x: 19, y: 10, text: 'CH 1 · SPARK' },
-      { x: 19, y: 15, text: 'CH 3 · QUANTA' },
+      { x: 14, y: 10, text: 'CLICK THE SPARK' },
+      { x: 19, y: 6, text: 'CH 2 · PULSAR' },
+      { x: 19, y: 12, text: 'CH 1 · SPARK' },
+      { x: 19, y: 18, text: 'CH 3 · QUANTA' },
     ],
   }
 }
 
 function foodChain(): Scene {
-  const size = { cols: 48, rows: 30 }
-  const pinnedFactories = [...stamp(FACTORY(4), 6, 15, 1), ...stamp(FACTORY(6), 41, 14, 3)]
+  const size = { cols: 48, rows: 34 }
+  const pinnedFactories = [...stamp(FACTORY(4), 6, 17, 0), ...stamp(FACTORY(6), 41, 16, 3)]
   const specs: Spec[] = [
-    ...stamp(PREDATOR, 16, 6, 1),
-    ...stamp(PREDATOR, 32, 23, 3),
-    ...stamp(PREDATOR, 24, 13, 0),
-    ...stamp(WANDERER(0.1), 12, 25, 0),
-    ...stamp(WANDERER(0.1), 37, 4, 2),
+    ...stamp(PREDATOR, 14, 8, 0),
+    ...stamp(PREDATOR, 33, 27, 3),
+    ...stamp(PREDATOR, 24, 17, 1),
   ]
   const all: Spec[] = [...pinnedFactories, ...specs]
   scatter(all, size, 45, ['lumen'], 11)
@@ -334,7 +415,7 @@ function foodChain(): Scene {
 }
 
 function swarm(): Scene {
-  const size = { cols: 60, rows: 36 }
+  const size = { cols: 60, rows: 42 }
   const rand = mulberry(5)
   const specs: Spec[] = []
   const taken = new Set<string>()
@@ -342,9 +423,9 @@ function swarm(): Scene {
   for (let tries = 0; made < 18 && tries < 2000; tries++) {
     const ox = 3 + Math.floor(rand() * (size.cols - 6))
     const oy = 3 + Math.floor(rand() * (size.rows - 6))
-    const turns = Math.floor(rand() * 4)
+    const turns = Math.floor(rand() * 6)
     const body = stamp(WANDERER(0.08 + rand() * 0.1), ox, oy, turns)
-    const clash = body.some(([, x, y]) => [-1, 0, 1].some((dx) => [-1, 0, 1].some((dy) => taken.has(`${x + dx},${y + dy}`))))
+    const clash = body.some(([, x, y]) => around(x, y).some(([nx, ny]) => taken.has(`${nx},${ny}`)))
     if (clash) continue
     body.forEach(([, x, y]) => taken.add(`${x},${y}`))
     specs.push(...body)
@@ -358,42 +439,45 @@ function swarm(): Scene {
 }
 
 function sporeBurst(): Scene {
+  const size = { cols: 40, rows: 28 }
   const specs: Spec[] = []
   const periods = [24, 40, 56, 72, 88, 104]
-  periods.forEach((p, i) => specs.push(...stamp(SPORE(p), 7 + (i % 3) * 12, 6 + Math.floor(i / 3) * 11, i % 4)))
-  scatter(specs, { cols: 40, rows: 24 }, 24, ['conduit', 'lumen', 'and', 'or'], 31)
+  periods.forEach((p, i) => specs.push(...stamp(SPORE(p), 7 + (i % 3) * 12, 7 + Math.floor(i / 3) * 13, i)))
+  scatter(specs, size, 24, ['conduit', 'lumen', 'and', 'or'], 31)
   return {
-    world: { ...emptyWorld({ cols: 40, rows: 24 }), atoms: build(specs) },
+    world: { ...emptyWorld(size), atoms: build(specs) },
     notes: [{ x: 1, y: 0, text: 'EACH CLASP LETS GO ON ITS OWN SCHEDULE' }],
   }
 }
 
 function accretion(): Scene {
-  // Seed crystal: a Magnetar caged in a charged conduit lattice that anything can dock onto.
-  const specs: Spec[] = [
-    ['magnetar', 18, 11, 0, { radius: 10 }],
-    ['spark', 17, 11, 0, { on: true }],
-    ['conduit', 16, 11],
-    ['conduit', 17, 10],
-    ['conduit', 18, 10],
-    ['conduit', 19, 10],
-    ['conduit', 19, 11],
-    ['conduit', 19, 12],
-    ['conduit', 18, 12],
-    ['conduit', 17, 12],
-  ]
+  // Seed crystal: a Spark-charged Magnetar ringed by a conduit lattice that anything can dock onto.
+  const [cx, cy] = [18, 13]
+  const specs: Spec[] = stamp(
+    [
+      ['magnetar', 0, 0, 0, { radius: 10 }],
+      ['spark', -1, 0, 0, { on: true }],
+      ['conduit', 0, -1],
+      ['conduit', 1, -1],
+      ['conduit', 1, 0],
+      ['conduit', 0, 1],
+      ['conduit', -1, 1],
+    ],
+    cx,
+    cy,
+  )
   const debris: AtomKind[] = ['conduit', 'conduit', 'conduit', 'and', 'or', 'xor', 'not', 'lumen', 'lumen', 'lumen', 'pulsar']
   const rand = mulberry(7)
   const taken = new Set(specs.map(([, x, y]) => `${x},${y}`))
+  const [px, py] = centerOf(cx, cy)
   let n = 0
   while (n < 40) {
     const ang = rand() * Math.PI * 2
     const r = 4 + rand() * 6
-    const x = Math.round(18 + Math.cos(ang) * r)
-    const y = Math.round(11 + Math.sin(ang) * r)
-    if (x < 0 || y < 0 || x >= 36 || y >= 22 || taken.has(`${x},${y}`)) continue
+    const [x, y] = cellAt(px + Math.cos(ang) * r, py + Math.sin(ang) * r)
+    if (x < 0 || y < 0 || x >= DEFAULT_SIZE.cols || y >= DEFAULT_SIZE.rows || taken.has(`${x},${y}`)) continue
     taken.add(`${x},${y}`)
-    specs.push([debris[Math.floor(rand() * debris.length)], x, y, Math.floor(rand() * 4)])
+    specs.push([debris[Math.floor(rand() * debris.length)], x, y, Math.floor(rand() * 6)])
     n++
   }
   return {
@@ -403,28 +487,29 @@ function accretion(): Scene {
 }
 
 function chasers(): Scene {
+  // East neighbours share a row, so plain cell coordinates work for these.
   const specs: Spec[] = [
     // A plain predator/prey pair.
-    ['magnetar', 8, 5],
-    ['repulsar', 11, 6],
+    ['magnetar', 8, 6],
+    ['repulsar', 11, 7],
     // A heartbeat swimmer: the Pulsar switches its Magnetar on and off.
-    ['pulsar', 20, 11, 0, { period: 6 }],
-    ['magnetar', 21, 11],
-    ['repulsar', 24, 13],
-    // A lit creature: Spark powers a lamp riding on the attractor.
-    ['spark', 9, 16, 0, { on: true }],
-    ['magnetar', 10, 16],
-    ['lumen', 9, 17],
-    ['repulsar', 12, 18],
+    ['pulsar', 20, 13, 0, { period: 6 }],
+    ['magnetar', 21, 13],
+    ['repulsar', 24, 15],
+    // A lit creature: a Spark powers the attractor and a lamp riding on it.
+    ['spark', 9, 19, 0, { on: true }],
+    ['magnetar', 10, 19],
+    ['lumen', ...neighbor(9, 19, 1)],
+    ['repulsar', 12, 21],
     // Loose plankton to bump into.
     ['conduit', 28, 4],
     ['conduit', 29, 4],
     ['lumen', 30, 4],
-    ['or', 30, 17],
+    ['or', 30, 19],
     ['conduit', 15, 3],
-    ['not', 4, 12],
-    ['conduit', 32, 10],
-    ['lumen', 33, 10],
+    ['not', 4, 14],
+    ['conduit', 32, 11],
+    ['lumen', 33, 11],
   ]
   return {
     world: { ...emptyWorld(DEFAULT_SIZE, 0.06), atoms: build(specs) },
@@ -455,7 +540,7 @@ const SOUP_MIX: [AtomKind, number][] = [
   ['fabricator', 1],
 ]
 
-export function primordialSoup(size: Size = { cols: 60, rows: 36 }, seed = Math.floor(Math.random() * 1e9)): Scene {
+export function primordialSoup(size: Size = { cols: 60, rows: 42 }, seed = Math.floor(Math.random() * 1e9)): Scene {
   const rand = mulberry(seed)
   const total = SOUP_MIX.reduce((s, [, w]) => s + w, 0)
   const pick = (): AtomKind => {
@@ -472,7 +557,7 @@ export function primordialSoup(size: Size = { cols: 60, rows: 36 }, seed = Math.
       if (rand() > 0.17) continue
       const kind = pick()
       atoms.push(
-        makeAtom(kind, x, y, Math.floor(rand() * 4), {
+        makeAtom(kind, x, y, Math.floor(rand() * 6), {
           ...(kind === 'spark' ? { on: rand() < 0.6 } : {}),
           ...(kind === 'pulsar' ? { period: 4 + Math.floor(rand() * 6) * 2 } : {}),
           ...(kind === 'quanta' ? { chance: 0.1 + rand() * 0.4 } : {}),

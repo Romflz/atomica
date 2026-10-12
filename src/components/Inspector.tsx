@@ -1,5 +1,7 @@
 import { CHANNEL_COLORS, DEFS, isForce, SIGNAL } from '../sim/atoms'
+import { canonSide } from '../sim/engine'
 import type { Graph } from '../sim/engine'
+import { SIDE_NAMES } from '../sim/hex'
 import type { Atom, AtomKind } from '../sim/types'
 import { AtomIcon } from './AtomView'
 
@@ -12,7 +14,6 @@ interface Props {
   onPinMolecule: (id: string, pinned: boolean) => void
 }
 
-const SIDE_NAMES = ['N', 'E', 'S', 'W']
 const PORT_LABEL = { in: 'slot', out: 'tab', io: 'socket', grip: 'grip' } as const
 
 function stateOf(a: Atom): string {
@@ -158,8 +159,8 @@ function AtomDetails({ atom, graph, onPatch, onRotate, onDelete, onPinMolecule }
       <section className="card">
         <h4>Ports</h4>
         <div className="compass">
-          {[0, 1, 2, 3].map((side) => {
-            const canon = (side - atom.rot + 8) % 4
+          {[0, 1, 2, 3, 4, 5].map((side) => {
+            const canon = canonSide(atom, side)
             const port = def.ports[canon]
             const face = def.faces?.[canon]
             const link = links.find((l) => l.side === side)
@@ -226,7 +227,9 @@ function FieldGuide() {
             tab <i>→</i> tab, slot <i>→</i> slot <b className="no">repel</b>
           </div>
         </div>
-        <p className="muted small">Pieces lock together like a jigsaw. Everything bonded is one rigid molecule that moves as a single body.</p>
+        <p className="muted small">
+          Every atom is a hexagon with six edges. Pieces lock together like a jigsaw, and everything bonded is one rigid molecule that moves as a single body.
+        </p>
       </section>
 
       <section className="card">
@@ -261,7 +264,7 @@ function FieldGuide() {
       <section className="card">
         <h4>Try building</h4>
         <ul className="rules">
-          <li>A walker: Spark → Propulsor, with a Quanta pulsing a Gyron so it turns at random.</li>
+          <li>A walker: Spark → Propulsor, with a Quanta pulsing a Gyron so it turns 60° at random.</li>
           <li>A hunter: an Oculus looking through a Devourer, wired to both the mouth and a Propulsor.</li>
           <li>A ripple counter: Mnemons chained through Negons, clocked by a Pulsar.</li>
           <li>A printer: a Pulsar clocking a Fabricator that holds the atom you want copied.</li>
@@ -275,8 +278,8 @@ function FieldGuide() {
           <dd>place / move atom</dd>
           <dt>Shift+Drag</dt>
           <dd>move whole molecule</dd>
-          <dt>Right-click</dt>
-          <dd>rotate atom</dd>
+          <dt>R · Right-click</dt>
+          <dd>rotate 60°</dd>
           <dt>Click Spark</dt>
           <dd>toggle it</dd>
           <dt>Drag off field</dt>

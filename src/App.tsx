@@ -11,19 +11,21 @@ import { StatsHud, TopBar } from './components/TopBar'
 import { addEvents, evaluate, freshProgress, levelOf, meterFor } from './game/progress'
 import type { Discovery, Progress } from './game/progress'
 import type { FieldScene, Ghost, View } from './gpu/FieldRenderer'
-import { CELL } from './render/geometry'
+import { boardSize, pixelToCell, sizeAt } from './render/geometry'
 import { DEFS, makeAtom } from './sim/atoms'
 import { MAX_SIZE, MIN_SIZE, primordialSoup, SCENES } from './sim/demos'
 import type { Note, Size } from './sim/demos'
 import { buildGraph, cellKey, emptyEvents, step } from './sim/engine'
+import { delta, translate, turnDelta } from './sim/hex'
 import type { Graph } from './sim/engine'
 import type { Atom, AtomKind, World } from './sim/types'
 import './App.css'
 
+/** A dragged atom and its axial offset from the atom under the pointer. */
 interface DragItem {
   atom: Atom
-  dx: number
-  dy: number
+  dq: number
+  dr: number
 }
 
 interface DragState {
@@ -43,7 +45,8 @@ type Gesture =
 
 type Origin = 'sandbox' | 'preset'
 
-const SAVE_KEY = 'atomforge.v2'
+// Square-grid saves (v2) don't fit the hex grid, so hex worlds save under a new key.
+const SAVE_KEY = 'atomforge.hex.v1'
 const PROGRESS_KEY = 'atomforge.progress.v1'
 const RENDERER_KEY = 'atomforge.renderer'
 const START_SCENE = 'foodchain'
@@ -78,7 +81,7 @@ function initial(): Saved {
   if (saved?.world && Array.isArray(saved.world.atoms) && saved.world.atoms.every((a) => a.kind in DEFS) && saved.world.atoms.length) {
     return { world: saved.world, notes: saved.notes ?? [], sceneId: 'custom', origin: saved.origin ?? 'sandbox' }
   }
-  const scene = SCENES.find((s) => s.id === START_SCENE)!.make({ cols: 48, rows: 30 })
+  const scene = SCENES.find((s) => s.id === START_SCENE)!.make({ cols: 48, rows: 34 })
   return { ...scene, sceneId: START_SCENE, origin: 'preset' }
 }
 
@@ -93,7 +96,10 @@ function initialProgress(): Progress {
 function placement(world: World, drag: DragState): Ghost | null {
   if (!drag.cell) return null
   const occupied = new Set(world.atoms.map((a) => cellKey(world, a.x, a.y)))
-  const cells = drag.items.map((i) => ({ atom: i.atom, x: drag.cell!.x + i.dx, y: drag.cell!.y + i.dy }))
+  const cells = drag.items.map((i) => {
+    const [x, y] = translate(drag.cell!.x, drag.cell!.y, i.dq, i.dr)
+    return { atom: i.atom, x, y }
+  })
   const valid = cells.every(
     (c) => c.x >= 0 && c.y >= 0 && c.x < world.cols && c.y < world.rows && !occupied.has(cellKey(world, c.x, c.y)),
   )
@@ -244,8 +250,9 @@ export default function App() {
     const { width, height } = host.getBoundingClientRect()
     const w = worldRef.current
     const pad = 28
-    const k = Math.min((width - pad * 2) / (w.cols * CELL), (height - pad * 2) / (w.rows * CELL))
-    setView({ k, x: (width - w.cols * CELL * k) / 2, y: (height - w.rows * CELL * k) / 2 })
+    const board = boardSize(w.cols, w.rows)
+    const k = Math.min((width - pad * 2) / board.w, (height - pad * 2) / board.h)
+    setView({ k, x: (width - board.w * k) / 2, y: (height - board.h * k) / 2 })
   }, [])
 
   useLayoutEffect(() => {
@@ -284,7 +291,7 @@ export default function App() {
       if (!hostRef.current) return null
       const { wx, wy, rect } = toWorld(cx, cy)
       if (cx < rect.left || cy < rect.top || cx > rect.right || cy > rect.bottom) return null
-      return { x: Math.floor(wx / CELL), y: Math.floor(wy / CELL) }
+      return pixelToCell(wx, wy)
     },
     [toWorld],
   )
@@ -301,7 +308,7 @@ export default function App() {
   )
 
   const rotateAtom = useCallback(
-    (id: string) => commit((w) => ({ ...w, atoms: w.atoms.map((a) => (a.id === id ? { ...a, rot: (a.rot + 1) % 4 } : a)) })),
+    (id: string) => commit((w) => ({ ...w, atoms: w.atoms.map((a) => (a.id === id ? { ...a, rot: (a.rot + 1) % 6 } : a)) })),
     [commit],
   )
 
@@ -340,7 +347,7 @@ export default function App() {
     (id: string) => {
       const scene = SCENES.find((s) => s.id === id) ?? SCENES.find((s) => s.id === 'empty')!
       const cur = worldRef.current
-      const made = id === 'soup' ? primordialSoup({ cols: Math.max(cur.cols, 36), rows: Math.max(cur.rows, 22) }) : scene.make({ cols: cur.cols, rows: cur.rows })
+      const made = id === 'soup' ? primordialSoup({ cols: Math.max(cur.cols, 36), rows: Math.max(cur.rows, 26) }) : scene.make({ cols: cur.cols, rows: cur.rows })
       commit(() => made.world)
       setNotes(made.notes)
       setSceneId(scene.id)
@@ -363,7 +370,7 @@ export default function App() {
   }
 
   const grabFromPalette = (kind: AtomKind, e: ReactPointerEvent) => {
-    beginDrag([{ atom: makeAtom(kind, 0, 0), dx: 0, dy: 0 }], 'palette', e.clientX, e.clientY)
+    beginDrag([{ atom: makeAtom(kind, 0, 0), dq: 0, dr: 0 }], 'palette', e.clientX, e.clientY)
   }
 
   const liftFromField = (atomId: string, wholeMolecule: boolean, cx: number, cy: number) => {
@@ -374,7 +381,8 @@ export default function App() {
     const lifted = new Set(ids)
     const items = ids.map((id) => {
       const a = g.byId.get(id)!
-      return { atom: a, dx: a.x - anchor.x, dy: a.y - anchor.y }
+      const [dq, dr] = delta(anchor.x, anchor.y, a.x, a.y)
+      return { atom: a, dq, dr }
     })
     commit((cur) => ({ ...cur, atoms: cur.atoms.filter((a) => !lifted.has(a.id)) }))
     setSelectedId(atomId)
@@ -416,7 +424,17 @@ export default function App() {
   }
 
   const rotateDrag = () =>
-    setDrag((d) => (d ? { ...d, items: d.items.map((i) => ({ atom: { ...i.atom, rot: (i.atom.rot + 1) % 4 }, dx: -i.dy, dy: i.dx })) } : d))
+    setDrag((d) =>
+      d
+        ? {
+            ...d,
+            items: d.items.map((i) => {
+              const [dq, dr] = turnDelta(i.dq, i.dr)
+              return { atom: { ...i.atom, rot: (i.atom.rot + 1) % 6 }, dq, dr }
+            }),
+          }
+        : d,
+    )
 
   // ── Pointer gestures ──────────────────────────────────────────────
   useEffect(() => {
@@ -432,8 +450,9 @@ export default function App() {
         if (Math.hypot(e.clientX - g.sx, e.clientY - g.sy) > 5) liftFromField(g.atomId, g.shift, e.clientX, e.clientY)
       } else if (g.type === 'resize') {
         const { wx, wy } = toWorld(e.clientX, e.clientY)
-        const cols = Math.max(MIN_SIZE.cols, Math.min(MAX_SIZE.cols, Math.round(wx / CELL)))
-        const rows = Math.max(MIN_SIZE.rows, Math.min(MAX_SIZE.rows, Math.round(wy / CELL)))
+        const at = sizeAt(wx, wy)
+        const cols = Math.max(MIN_SIZE.cols, Math.min(MAX_SIZE.cols, at.cols))
+        const rows = Math.max(MIN_SIZE.rows, Math.min(MAX_SIZE.rows, at.rows))
         setResizePreview((p) => (p && p.cols === cols && p.rows === rows ? p : { cols, rows }))
       } else {
         const cell = clientToCell(e.clientX, e.clientY)

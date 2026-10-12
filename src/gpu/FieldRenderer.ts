@@ -4,11 +4,13 @@
  * The React layer owns state and input; this class owns a Pixi scene graph and
  * reconciles it against each new world snapshot in `sync`.
  *
- * Scaling strategy: every distinct atom look (its `artKey`) is tessellated
- * once from the shared `atomArt` description and *baked* into a texture at a
- * resolution matched to the current zoom. Atoms are then plain sprites, which
- * the GPU draws in large batches, so cost stays nearly flat from a dozen atoms
- * to tens of thousands. Only small animated parts (spinning rings, flames,
+ * Scaling strategy: an atom is a *body* (depends only on the atom) plus a few
+ * per-side *parts* (conduit arms, lit slot rims, charge dots), each from a
+ * small shared vocabulary. Every distinct body and part is tessellated once
+ * from the shared art description and *baked* into a texture at a resolution
+ * matched to the current zoom. Atoms are then plain sprites, which the GPU
+ * draws in large batches, so cost stays nearly flat from a dozen atoms to
+ * tens of thousands. Only small animated parts (spinning rings, flames,
  * sight beams) stay as live vector meshes, all well under Pixi's batching
  * limit. When the zoom crosses a resolution step, visible atoms are re-baked a
  * few dozen per frame so there is never a hitch. Glows are additive sprites,
@@ -24,19 +26,20 @@ import {
   GraphicsContext,
   GraphicsPath,
   Rectangle,
+  RenderTexture,
   Sprite,
   Text,
   Texture,
   TilingSprite,
 } from 'pixi.js'
 import type { RendererPreference } from 'pixi.js'
-import { artKey, atomArt, sidesFor, unbonded } from '../render/art'
-import type { Anim, Shape } from '../render/art'
-import { CELL, H } from '../render/geometry'
+import { atomArt, bodyArt, bodyKey, sideParts, sidesFor } from '../render/art'
+import type { Anim, Part, Shape } from '../render/art'
+import { boardOutline, boardSize, CELL, cellCenter, H, HEX_R, hexCorners } from '../render/geometry'
 import { isForce } from '../sim/atoms'
 import type { Note } from '../sim/demos'
-import { DX, DY } from '../sim/engine'
 import type { Graph } from '../sim/engine'
+import { DIR } from '../sim/hex'
 import type { Atom, World } from '../sim/types'
 
 export interface View {
@@ -76,7 +79,9 @@ interface Built {
   glow: GraphicsContext | null
   free: Layer | null
   anims: Partial<Record<Anim, Layer>>
+  /** Large halos (a Lumen's light) stay live sprites; small ones are baked in. */
   halos: HaloShape[]
+  bakedHalos: HaloShape[]
   texts: TextShape[]
 }
 
@@ -86,13 +91,23 @@ interface LiveLayer {
   glow: Graphics
 }
 
+/**
+ * One atom on screen. Only the body sprite always exists; the other layers
+ * are created on first need, since most atoms never use most of them and
+ * every idle display object still costs scene-traversal time.
+ */
 interface AtomNode {
   c: Container
-  mark: Graphics
-  halos: Container
-  free: LiveLayer
   sprite: Sprite
+  mark?: Graphics
+  halos?: Container
+  free?: LiveLayer
+  under?: Container
+  over?: Container
   anims: Partial<Record<Anim, LiveLayer>>
+  /** Part cache keys currently shown, and their joined signature. */
+  parts: { key: string; under: boolean }[]
+  partsSig: string
   key: string
   res: number
   /** A new look waiting for bake budget; the old texture shows until then. */
@@ -116,12 +131,16 @@ interface FieldNode {
 }
 
 const ANIMS: Anim[] = ['spin', 'flicker', 'pulse']
+/** Draw order inside an atom node. */
+const Z = { mark: 0, halo: 1, free: 2, under: 3, body: 4, over: 5, anim: 6 }
 const FONT_DISPLAY = 'AtomDisplay'
 const FONT_MONO = 'AtomMono'
-/** Baked textures cover ±BAKE units around the cell centre (tabs and arms reach ~50). */
-const BAKE = 56
+/** Baked textures cover ±BAKE units around the cell centre (tabs and arms reach ~54). */
+const BAKE = 58
 const RES_STEPS = [0.25, 0.5, 1, 2, 4]
 const REBAKE_PER_FRAME = 40
+const ATLAS_PAGE = 2048
+const ATLAS_PAD = 2
 /** New looks baked synchronously per sync; the rest are spread over following frames. */
 const BAKES_PER_SYNC = 150
 const MAX_TEXTURES = 2500
@@ -148,7 +167,11 @@ export class FieldRenderer {
   private fields = new Map<string, FieldNode>()
   private flashes: { s: Sprite; t: number }[] = []
   private built = new Map<string, Built>()
-  private textures = new Map<string, { tex: Texture; used: number }>()
+  private textures = new Map<string, { tex: Texture; used: number; slot: Slot }>()
+  private atlas = new Atlas()
+  private paste = new Container()
+  private pasteSprite = new Sprite()
+  private eraser = new Graphics()
   private animated = new Set<AtomNode>()
 
   private tex!: { halo: Texture; ring: Texture; dash: Texture; grid: Texture }
@@ -159,6 +182,7 @@ export class FieldRenderer {
   private resizeLabel!: Text
   private grid?: TilingSprite
   private board = new Graphics()
+  private boardMask = new Graphics()
   private edge = new Graphics()
 
   private scene: FieldScene | null = null
@@ -191,7 +215,6 @@ export class FieldRenderer {
     }
     this.backend = this.app.renderer.name
     this.app.stage.eventMode = 'none'
-    if (import.meta.env.DEV) (window as unknown as { __field: FieldRenderer }).__field = this
     host.appendChild(this.app.canvas)
 
     await loadFonts()
@@ -213,18 +236,20 @@ export class FieldRenderer {
 
     this.tex = makeTextures()
     this.markCtx
-      .roundRect(-CELL / 2 + 1, -CELL / 2 + 1, CELL - 2, CELL - 2, 14)
+      .poly(hexCorners(HEX_R - 1.5).flat())
       .fill({ color: '#38e8ff', alpha: 0.06 })
       .stroke({ width: 1.5, color: '#38e8ff', alpha: 0.35 })
     this.drawReticle()
-    this.hoverBox.roundRect(-H - 5, -H - 5, H * 2 + 10, H * 2 + 10, 13).stroke({ width: 1.5, color: '#ffffff', alpha: 0.22 })
+    this.hoverBox.poly(hexCorners(((H + 5) * 2) / Math.sqrt(3)).flat()).stroke({ width: 1.5, color: '#ffffff', alpha: 0.22, join: 'round' })
     this.hoverBox.visible = false
     this.resizeLabel = new Text({ text: '', style: { fontFamily: 'Orbitron, sans-serif', fontSize: 22, fontWeight: '700', fill: '#38e8ff', letterSpacing: 2 } })
     this.resizeLabel.anchor.set(1, 1)
 
+    // Pan and zoom move this one group on the GPU instead of re-deriving every atom's transform.
+    this.root.isRenderGroup = true
     this.app.stage.addChild(this.root)
     this.root.addChild(this.boardLayer, this.noteLayer, this.fieldLayer, this.atomLayer, this.fxLayer, this.ghostLayer, this.uiLayer)
-    this.boardLayer.addChild(this.board, this.edge)
+    this.boardLayer.addChild(this.board, this.boardMask, this.edge)
     this.uiLayer.addChild(this.hoverBox, this.reticle, this.resizeGfx, this.resizeLabel)
 
     let statT = 0
@@ -280,20 +305,15 @@ export class FieldRenderer {
     for (const a of world.atoms) {
       seen.add(a.id)
       const s = sides.get(a.id)!
-      const tx = a.x * CELL + CELL / 2
-      const ty = a.y * CELL + CELL / 2
+      const [tx, ty] = cellCenter(a.x, a.y)
       let n = this.nodes.get(a.id)
       if (!n) {
         n = this.createNode(tx, ty)
         this.nodes.set(a.id, n)
       }
-      const key = artKey(a, s)
+      const key = bodyKey(a)
       if (n.key !== key && n.pending?.key !== key) {
-        let b = this.built.get(key)
-        if (!b) {
-          b = buildArt(atomArt(a, s))
-          this.built.set(key, b)
-        }
+        const b = this.builtFor(key, () => bodyArt(a))
         const cached = this.textures.has(`${key}@${this.res}`)
         if (cached || bakes < BAKES_PER_SYNC || !n.key) {
           if (!cached) bakes++
@@ -303,9 +323,14 @@ export class FieldRenderer {
           n.pending = { key, b }
         }
       }
+      const parts = sideParts(a, s)
+      const sig = parts.map((p) => p.key).join(';')
+      if (sig !== n.partsSig) this.applyParts(n, parts, sig)
       n.tx = tx
       n.ty = ty
-      n.mark.visible = selectedMol.has(a.id)
+      const marked = selectedMol.has(a.id)
+      if (marked && !n.mark) n.mark = this.layer(n, new Graphics(this.markCtx), Z.mark)
+      if (n.mark) n.mark.visible = marked
     }
     for (const [id, n] of this.nodes) {
       if (seen.has(id)) continue
@@ -323,17 +348,22 @@ export class FieldRenderer {
 
   private createNode(x: number, y: number): AtomNode {
     const c = new Container()
-    const mark = new Graphics(this.markCtx)
-    mark.visible = false
-    const halos = new Container()
-    const free = makeLiveLayer()
+    c.sortableChildren = true
     const sprite = new Sprite()
     sprite.anchor.set(0.5)
-    c.addChild(mark, halos, free.c, sprite)
+    sprite.zIndex = Z.body
+    c.addChild(sprite)
     c.position.set(x, y)
     c.scale.set(0.3)
     this.atomLayer.addChild(c)
-    return { c, mark, halos, free, sprite, anims: {}, key: '', res: 0, pending: null, x, y, tx: x, ty: y, pop: 0 }
+    return { c, sprite, anims: {}, parts: [], partsSig: '', key: '', res: 0, pending: null, x, y, tx: x, ty: y, pop: 0 }
+  }
+
+  /** Attach a lazily created layer to a node at its fixed depth. */
+  private layer<T extends Container>(n: AtomNode, child: T, z: number): T {
+    child.zIndex = z
+    n.c.addChild(child)
+    return child
   }
 
   private applyArt(n: AtomNode, key: string, b: Built) {
@@ -342,7 +372,11 @@ export class FieldRenderer {
     n.sprite.width = n.sprite.height = BAKE * 2
     n.res = this.res
 
-    setLayer(n.free, b.free)
+    if (b.free && !n.free) n.free = makeLiveLayer()
+    if (n.free) {
+      if (!n.free.c.parent) this.layer(n, n.free.c, Z.free)
+      setLayer(n.free, b.free)
+    }
 
     let hasAnim = false
     for (const kind of ANIMS) {
@@ -350,7 +384,7 @@ export class FieldRenderer {
       let layer = n.anims[kind]
       if (src && !layer) {
         layer = n.anims[kind] = makeLiveLayer()
-        n.c.addChild(layer.c)
+        this.layer(n, layer.c, Z.anim)
       }
       if (layer) setLayer(layer, src ?? null)
       if (src) hasAnim = true
@@ -358,18 +392,65 @@ export class FieldRenderer {
     if (hasAnim) this.animated.add(n)
     else this.animated.delete(n)
 
-    syncPool(n.halos, b.halos.length, () => {
+    if (b.halos.length && !n.halos) n.halos = this.layer(n, new Container(), Z.halo)
+    if (!n.halos) return
+    const halos = n.halos
+    syncPool(halos, b.halos.length, () => {
       const s = new Sprite(this.tex.halo)
       s.anchor.set(0.5)
       s.blendMode = 'add'
       return s
     })
     b.halos.forEach((h, i) => {
-      const s = n.halos.children[i] as Sprite
+      const s = halos.children[i] as Sprite
       s.tint = h.color
       s.alpha = h.alpha
       s.width = s.height = h.r * 2
     })
+  }
+
+  private applyParts(n: AtomNode, parts: Part[], sig: string) {
+    n.partsSig = sig
+    n.parts = parts.map((p) => {
+      const key = `part|${p.key}`
+      this.builtFor(key, p.shapes)
+      return { key, under: p.under }
+    })
+    this.texturePartsAt(n, this.res)
+  }
+
+  /** Point a node's part sprites at textures baked for `res`. */
+  private texturePartsAt(n: AtomNode, res: number) {
+    const under = n.parts.filter((p) => p.under)
+    const over = n.parts.filter((p) => !p.under)
+    if (under.length && !n.under) n.under = this.layer(n, new Container(), Z.under)
+    if (over.length && !n.over) n.over = this.layer(n, new Container(), Z.over)
+    for (const [pool, list] of [
+      [n.under, under],
+      [n.over, over],
+    ] as const) {
+      if (!pool) continue
+      syncPool(pool, list.length, () => {
+        const sp = new Sprite()
+        sp.anchor.set(0.5)
+        return sp
+      })
+      list.forEach((p, i) => {
+        const sp = pool.children[i] as Sprite
+        sp.texture = this.textureFor(p.key, this.built.get(p.key)!, res)
+        sp.width = sp.height = BAKE * 2
+      })
+    }
+  }
+
+  /** Tessellated artwork for a cache key, building it on first use. */
+  private builtFor(key: string, shapes: () => Shape[]): Built {
+    let b = this.built.get(key)
+    if (!b) {
+      b = buildArt(shapes())
+      this.built.set(key, b)
+    }
+    return b
   }
 
   /** Baked texture for a look at a resolution, rendering it on first use. */
@@ -377,15 +458,30 @@ export class FieldRenderer {
     const id = `${key}@${res}`
     let e = this.textures.get(id)
     if (!e) {
-      e = { tex: this.bake(b, res), used: this.frame }
+      const { tex, slot } = this.bake(b, res)
+      e = { tex, used: this.frame, slot }
       this.textures.set(id, e)
     }
     e.used = this.frame
     return e.tex
   }
 
-  private bake(b: Built, res: number): Texture {
+  /**
+   * Render a look with MSAA into a scratch texture, then copy it into a free
+   * slot on a shared atlas page. Sharing one texture source per page is what
+   * lets thousands of atom sprites draw in a handful of batches.
+   */
+  private bake(b: Built, res: number): { tex: Texture; slot: Slot } {
     const stage = this.bakeStage
+    for (const h of b.bakedHalos) {
+      const hs = new Sprite(this.tex.halo)
+      hs.anchor.set(0.5)
+      hs.blendMode = 'add'
+      hs.tint = h.color
+      hs.alpha = h.alpha
+      hs.width = hs.height = h.r * 2
+      stage.addChild(hs)
+    }
     stage.addChild(new Graphics(b.base))
     if (b.glow) {
       const g = new Graphics(b.glow)
@@ -400,10 +496,24 @@ export class FieldRenderer {
       bt.alpha = t.alpha ?? 1
       stage.addChild(bt)
     }
-    const tex = this.app.renderer.generateTexture({ target: stage, frame: new Rectangle(-BAKE, -BAKE, BAKE * 2, BAKE * 2), resolution: res, antialias: true })
+    const scratch = this.app.renderer.generateTexture({ target: stage, frame: new Rectangle(-BAKE, -BAKE, BAKE * 2, BAKE * 2), resolution: res, antialias: true })
     // Graphics built on shared contexts leave those contexts intact when destroyed.
     stage.removeChildren().forEach((c) => c.destroy())
-    return tex
+
+    const size = Math.ceil(BAKE * 2 * res)
+    const slot = this.atlas.alloc(size)
+    if (!this.paste.children.length) {
+      this.eraser.blendMode = 'erase'
+      this.paste.addChild(this.eraser, this.pasteSprite)
+    }
+    this.eraser.clear().rect(slot.x - ATLAS_PAD, slot.y - ATLAS_PAD, size + ATLAS_PAD * 2, size + ATLAS_PAD * 2).fill('#ffffff')
+    this.pasteSprite.texture = scratch
+    this.pasteSprite.position.set(slot.x, slot.y)
+    this.pasteSprite.width = this.pasteSprite.height = size
+    this.app.renderer.render({ container: this.paste, target: slot.page.rt, clear: false })
+    this.pasteSprite.texture = Texture.EMPTY
+    scratch.destroy(true)
+    return { tex: new Texture({ source: slot.page.rt.source, frame: new Rectangle(slot.x, slot.y, size, size) }), slot }
   }
 
   private syncFields(world: World, show: boolean) {
@@ -465,7 +575,8 @@ export class FieldRenderer {
       const s = new Sprite(this.tex.ring)
       s.anchor.set(0.5)
       s.blendMode = 'add'
-      s.position.set(a.x * CELL + CELL / 2 + (DX[b.side] * CELL) / 2, a.y * CELL + CELL / 2 + (DY[b.side] * CELL) / 2)
+      const [cx, cy] = cellCenter(a.x, a.y)
+      s.position.set(cx + (DIR[b.side][0] * CELL) / 2, cy + (DIR[b.side][1] * CELL) / 2)
       s.width = s.height = 6
       this.fxLayer.addChild(s)
       this.flashes.push({ s, t: 0 })
@@ -477,13 +588,18 @@ export class FieldRenderer {
 
   private drawBoard(cols: number, rows: number) {
     this.boardSize = `${cols}x${rows}`
-    const W = cols * CELL
-    const Hh = rows * CELL
-    this.board.clear().roundRect(0, 0, W, Hh, 10).fill({ color: '#080e1f' })
+    const { w, h } = boardSize(cols, rows)
+    const outline = boardOutline(cols, rows)
+    this.board.clear().poly(outline).fill({ color: '#080e1f' })
     this.grid?.destroy()
-    this.grid = new TilingSprite({ texture: this.tex.grid, width: W, height: Hh })
+    this.grid = new TilingSprite({ texture: this.tex.grid, width: w, height: h })
+    // The tile is one cell wide and two rows tall; stretch it to the exact row period.
+    this.grid.tileScale.set(1, (3 * HEX_R) / this.tex.grid.height)
+    // Clip the lattice to the board's zig-zag edge.
+    this.boardMask.clear().poly(outline).fill('#ffffff')
+    this.grid.mask = this.boardMask
     this.boardLayer.addChildAt(this.grid, 1)
-    this.edge.clear().roundRect(0, 0, W, Hh, 10).stroke({ width: 2, color: '#5a8cff', alpha: 0.4 })
+    this.edge.clear().poly(outline).stroke({ width: 2, color: '#5a8cff', alpha: 0.4, join: 'round' })
   }
 
   private drawNotes(notes: Note[]) {
@@ -493,7 +609,8 @@ export class FieldRenderer {
       const t = new Text({ text: n.text, style: { fontFamily: 'Orbitron, sans-serif', fontSize: 15, fontWeight: '700', fill: '#96b4ff', letterSpacing: 3 } })
       t.alpha = 0.42
       t.anchor.set(0, 0.5)
-      t.position.set(n.x * CELL + 8, n.y * CELL + CELL / 2)
+      const [cx, cy] = cellCenter(n.x, n.y)
+      t.position.set(cx - CELL / 2 + 8, cy)
       this.noteLayer.addChild(t)
     }
   }
@@ -505,15 +622,14 @@ export class FieldRenderer {
     const tint = ghost.valid ? '#38e8ff' : '#ff3b5c'
     for (const { atom, x, y } of ghost.cells) {
       const c = new Container()
-      c.position.set(x * CELL + CELL / 2, y * CELL + CELL / 2)
-      const cell = new Graphics().roundRect(-CELL / 2 + 2, -CELL / 2 + 2, CELL - 4, CELL - 4, 10).fill({ color: tint, alpha: 0.08 }).stroke({ width: 1.5, color: tint, alpha: 0.7 })
+      c.position.set(...cellCenter(x, y))
+      const cell = new Graphics()
+        .poly(hexCorners(HEX_R - 2).flat())
+        .fill({ color: tint, alpha: 0.08 })
+        .stroke({ width: 1.5, color: tint, alpha: 0.7, join: 'round' })
       const opts = { ghost: true, invalid: !ghost.valid }
-      const key = `ghost|${artKey(atom, unbonded(atom), opts)}`
-      let b = this.built.get(key)
-      if (!b) {
-        b = buildArt(atomArt(atom, undefined, opts))
-        this.built.set(key, b)
-      }
+      const key = `ghost|${bodyKey(atom, opts)}`
+      const b = this.builtFor(key, () => atomArt(atom, undefined, opts))
       const s = new Sprite(this.textureFor(key, b, this.res))
       s.anchor.set(0.5)
       s.width = s.height = BAKE * 2
@@ -525,8 +641,7 @@ export class FieldRenderer {
 
   private drawResize(world: World, preview: { cols: number; rows: number } | null) {
     const g = this.resizeGfx.clear()
-    const W = world.cols * CELL
-    const Hh = world.rows * CELL
+    const { w: W, h: Hh } = boardSize(world.cols, world.rows)
     // Corner grip: three diagonal strokes.
     for (let i = 0; i < 3; i++) {
       const o = 10 + i * 9
@@ -535,9 +650,8 @@ export class FieldRenderer {
     g.stroke({ width: 3, color: '#38e8ff', alpha: preview ? 1 : 0.55, cap: 'round' })
     this.resizeLabel.visible = !!preview
     if (!preview) return
-    const pw = preview.cols * CELL
-    const ph = preview.rows * CELL
-    g.rect(0, 0, pw, ph).fill({ color: '#38e8ff', alpha: 0.04 }).stroke({ width: 3, color: '#38e8ff', alpha: 0.9 })
+    const { w: pw, h: ph } = boardSize(preview.cols, preview.rows)
+    g.poly(boardOutline(preview.cols, preview.rows)).fill({ color: '#38e8ff', alpha: 0.04 }).stroke({ width: 3, color: '#38e8ff', alpha: 0.9, join: 'round' })
     // Shade whatever would be cropped away.
     if (pw < W) g.rect(pw, 0, W - pw, Hh).fill({ color: '#ff3b5c', alpha: 0.12 })
     if (ph < Hh) g.rect(0, ph, Math.min(pw, W), Hh - ph).fill({ color: '#ff3b5c', alpha: 0.12 })
@@ -547,16 +661,16 @@ export class FieldRenderer {
 
   private drawReticle() {
     const g = this.reticle
-    const r = H + 8
-    const l = 12
-    for (const [sx, sy] of [
-      [-1, -1],
-      [1, -1],
-      [1, 1],
-      [-1, 1],
-    ]) {
-      g.moveTo(sx * r, sy * (r - l)).lineTo(sx * r, sy * r).lineTo(sx * (r - l), sy * r)
-    }
+    // Brackets on the six corners of a hexagon just outside the body.
+    const corners = hexCorners(((H + 8) * 2) / Math.sqrt(3))
+    const l = 0.28
+    corners.forEach(([x, y], i) => {
+      const [px, py] = corners[(i + 5) % 6]
+      const [nx, ny] = corners[(i + 1) % 6]
+      g.moveTo(x + (px - x) * l, y + (py - y) * l)
+        .lineTo(x, y)
+        .lineTo(x + (nx - x) * l, y + (ny - y) * l)
+    })
     g.stroke({ width: 2.5, color: '#ffffff', alpha: 0.95, cap: 'round', join: 'round' })
     g.visible = false
   }
@@ -569,13 +683,16 @@ export class FieldRenderer {
       liveTex.add(n.sprite.texture)
       liveKeys.add(n.key)
       if (n.pending) liveKeys.add(n.pending.key)
+      for (const p of n.parts) liveKeys.add(p.key)
+      for (const pool of [n.under, n.over]) for (const sp of pool?.children ?? []) liveTex.add((sp as Sprite).texture)
     }
     for (const c of this.ghostLayer.children) for (const s of c.children) if (s instanceof Sprite) liveTex.add(s.texture)
     const entries = [...this.textures.entries()].sort((a, b) => a[1].used - b[1].used)
     for (const [id, e] of entries) {
       if (this.textures.size <= MAX_TEXTURES * 0.7) break
       if (liveTex.has(e.tex)) continue
-      e.tex.destroy(true)
+      e.tex.destroy(false)
+      this.atlas.release(e.slot)
       this.textures.delete(id)
     }
     if (this.built.size > MAX_BUILT) {
@@ -631,6 +748,7 @@ export class FieldRenderer {
           if (!this.textures.has(`${n.key}@${this.res}`)) bakes++
           n.sprite.texture = this.textureFor(n.key, b, this.res)
           n.sprite.width = n.sprite.height = BAKE * 2
+          this.texturePartsAt(n, this.res)
           n.res = this.res
         }
       }
@@ -691,6 +809,46 @@ export class FieldRenderer {
     const hov = this.hoverId && this.hoverId !== this.scene.selectedId ? this.nodes.get(this.hoverId) : undefined
     this.hoverBox.visible = !!hov
     if (hov) this.hoverBox.position.set(hov.x, hov.y)
+  }
+}
+
+// ── Atlas ───────────────────────────────────────────────────────────
+
+interface Page {
+  rt: RenderTexture
+  cell: number
+  cols: number
+  free: number[]
+  next: number
+}
+
+interface Slot {
+  page: Page
+  index: number
+  x: number
+  y: number
+}
+
+/** Fixed-size slot allocator over 2048² render-texture pages, one page family per slot size. */
+class Atlas {
+  private pages = new Map<number, Page[]>()
+
+  alloc(size: number): Slot {
+    const cell = size + ATLAS_PAD * 2
+    const family = this.pages.get(cell) ?? []
+    this.pages.set(cell, family)
+    let page = family.find((p) => p.free.length || p.next < p.cols * p.cols)
+    if (!page) {
+      const cols = Math.max(1, Math.floor(ATLAS_PAGE / cell))
+      page = { rt: RenderTexture.create({ width: cols * cell, height: cols * cell, resolution: 1 }), cell, cols, free: [], next: 0 }
+      family.push(page)
+    }
+    const index = page.free.length ? page.free.pop()! : page.next++
+    return { page, index, x: (index % page.cols) * cell + ATLAS_PAD, y: Math.floor(index / page.cols) * cell + ATLAS_PAD }
+  }
+
+  release(slot: Slot) {
+    slot.page.free.push(slot.index)
   }
 }
 
@@ -759,6 +917,7 @@ function buildArt(shapes: Shape[]): Built {
   let free: Layer | null = null
   const anims: Built['anims'] = {}
   const halos: HaloShape[] = []
+  const bakedHalos: HaloShape[] = []
   const texts: TextShape[] = []
   const live = (l: Layer) => {
     // Live layers are small; force them into the sprite batch.
@@ -768,7 +927,7 @@ function buildArt(shapes: Shape[]): Built {
   }
   for (const s of shapes) {
     if (s.t === 'halo') {
-      halos.push(s)
+      ;(s.r <= BAKE ? bakedHalos : halos).push(s)
       continue
     }
     if (s.t === 'text') {
@@ -790,7 +949,7 @@ function buildArt(shapes: Shape[]): Built {
     paintShape(base, s)
     if (s.glow) paintGlow((glow ??= new GraphicsContext()), s)
   }
-  return { base, glow, free, anims, halos, texts }
+  return { base, glow, free, anims, halos, bakedHalos, texts }
 }
 
 function easeOutBack(x: number) {
@@ -840,21 +999,43 @@ function makeTextures() {
   d.arc(512, 512, 508, 0, Math.PI * 2)
   d.stroke()
 
-  const [gc, gx] = canvas(CELL * 2)
-  gx.scale(2, 2)
-  gx.strokeStyle = 'rgba(110,150,255,0.075)'
+  // Hex lattice tile: one cell wide, two rows (3 circumradii) tall, drawn at 2× for crispness.
+  // Its height is rounded to whole pixels, and the board's tileScale stretches it back exactly.
+  const tileH = 3 * HEX_R
+  const gc = document.createElement('canvas')
+  gc.width = CELL * 2
+  gc.height = Math.round(tileH * 2)
+  const gx = gc.getContext('2d')!
+  gx.scale(2, gc.height / tileH)
+  const centres = [
+    [CELL / 2, HEX_R - tileH],
+    [0, HEX_R - tileH / 2],
+    [CELL, HEX_R - tileH / 2],
+    [CELL / 2, HEX_R],
+    [0, HEX_R + tileH / 2],
+    [CELL, HEX_R + tileH / 2],
+    [CELL / 2, HEX_R + tileH],
+  ]
+  gx.strokeStyle = 'rgba(110,150,255,0.085)'
   gx.lineWidth = 1
   gx.beginPath()
-  gx.moveTo(CELL, 0.5)
-  gx.lineTo(0.5, 0.5)
-  gx.lineTo(0.5, CELL)
+  for (const [cx, cy] of centres) {
+    const pts = hexCorners(HEX_R, cx, cy)
+    gx.moveTo(...pts[0])
+    for (const p of pts.slice(1)) gx.lineTo(...p)
+    gx.closePath()
+  }
   gx.stroke()
-  gx.fillStyle = 'rgba(130,170,255,0.32)'
+  gx.fillStyle = 'rgba(130,170,255,0.3)'
   gx.beginPath()
-  gx.arc(0.5, 0.5, 1.6, 0, Math.PI * 2)
+  for (const [cx, cy] of centres) {
+    for (const [x, y] of hexCorners(HEX_R, cx, cy)) {
+      gx.moveTo(x + 1.5, y)
+      gx.arc(x, y, 1.5, 0, Math.PI * 2)
+    }
+  }
   gx.fill()
 
-  // Drawn at 2× for crispness; resolution 2 keeps the logical tile one cell wide.
   const grid = new Texture({ source: new CanvasSource({ resource: gc, resolution: 2 }) })
   return { halo: Texture.from(hc), ring: Texture.from(rc), dash: Texture.from(dc), grid }
 }

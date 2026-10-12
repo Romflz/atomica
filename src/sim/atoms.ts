@@ -5,7 +5,7 @@ export type Category = 'Source' | 'Wire' | 'Gate' | 'Memory' | 'Sense' | 'Output
 export interface ComputeCtx {
   /** Values arriving at each bonded `in` slot. Unbonded slots are absent. */
   inputs: boolean[]
-  /** Value at a bonded slot by canonical side (0 = N … 3 = W); undefined if unbonded. */
+  /** Value at a bonded slot by canonical side (0 = E, 1 = SE … 5 = NE); undefined if unbonded. */
   slot: (side: number) => boolean | undefined
   atom: Atom
   tick: number
@@ -25,10 +25,10 @@ export interface AtomDef {
   color: string
   category: Category
   caption: string
-  /** Ports in canonical orientation: [N, E, S, W]. */
-  ports: [Port, Port, Port, Port]
+  /** Ports in canonical orientation, clockwise from the front: [E, SE, SW, W, NW, NE]. */
+  ports: [Port, Port, Port, Port, Port, Port]
   /** Optional names for sides (canonical), e.g. an eye or a mouth. */
-  faces?: [string?, string?, string?, string?]
+  faces?: [string?, string?, string?, string?, string?, string?]
   blurb: string
   rules: string[]
   compute: (ctx: ComputeCtx) => ComputeResult
@@ -37,9 +37,12 @@ export interface AtomDef {
 export const SIGNAL = '#ffe14d'
 export const CHANNEL_COLORS = ['#38e8ff', '#ff6ee0', '#c6ff4d', '#ffb347']
 
-const GATE_PORTS: AtomDef['ports'] = ['in', 'out', 'in', 'in']
-const ALL_OUT: AtomDef['ports'] = ['out', 'out', 'out', 'out']
-const FORCE_PORTS: AtomDef['ports'] = [null, null, null, 'in']
+/** Tab in front, slots on the three back sides. */
+const GATE_PORTS: AtomDef['ports'] = ['out', null, 'in', 'in', 'in', null]
+/** Tab in front, one slot at the back. */
+const INLINE_PORTS: AtomDef['ports'] = ['out', null, null, 'in', null, null]
+const ALL_OUT: AtomDef['ports'] = ['out', 'out', 'out', 'out', 'out', 'out']
+const FORCE_PORTS: AtomDef['ports'] = [null, null, null, 'in', null, null]
 
 const forceActive = ({ inputs }: ComputeCtx) => inputs.length === 0 || inputs.some(Boolean)
 const anyInput = ({ inputs }: ComputeCtx) => inputs.some(Boolean)
@@ -60,7 +63,7 @@ export const DEFS: Record<AtomKind, AtomDef> = {
     caption: 'SWITCH',
     ports: ALL_OUT,
     blurb: 'A charged nucleus you flip by hand. Its charge leaks out of every tab.',
-    rules: ['Click to toggle ON / OFF', 'Emits from all four tabs', 'Bonds to any slot or conduit'],
+    rules: ['Click to toggle ON / OFF', 'Emits from all six tabs', 'Bonds to any slot or conduit'],
     compute: ({ atom }) => !!atom.on,
   },
   pulsar: {
@@ -73,7 +76,7 @@ export const DEFS: Record<AtomKind, AtomDef> = {
     caption: 'CLOCK',
     ports: ALL_OUT,
     blurb: 'A spinning core that beats on its own rhythm. The heartbeat of any machine.',
-    rules: ['ON for half its period, OFF for the rest', 'Period is tunable (2–32 ticks)', 'Emits from all four tabs'],
+    rules: ['ON for half its period, OFF for the rest', 'Period is tunable (2–32 ticks)', 'Emits from all six tabs'],
     compute: ({ atom, tick }) => {
       const p = atom.period ?? 8
       return tick % p < p / 2
@@ -100,7 +103,7 @@ export const DEFS: Record<AtomKind, AtomDef> = {
     color: '#8fb3d9',
     category: 'Wire',
     caption: 'WIRE',
-    ports: ['io', 'io', 'io', 'io'],
+    ports: ['io', 'io', 'io', 'io', 'io', 'io'],
     blurb: 'Copper lattice. Chains of conduits share one charge, instantly.',
     rules: ['Bonds on every side, to anything', 'Whole chain is ON if any tab feeds it', 'Zero propagation delay'],
     compute: () => false,
@@ -113,7 +116,7 @@ export const DEFS: Record<AtomKind, AtomDef> = {
     color: '#e0a8ff',
     category: 'Wire',
     caption: 'WIRELESS',
-    ports: [null, 'out', null, 'in'],
+    ports: INLINE_PORTS,
     blurb: 'One half of a quantum pair. What enters one twin leaves every other twin, anywhere on the field.',
     rules: ['Charge into its slot appears at all twins on its channel', 'No wire needed, any distance', '4 channels, 1 tick latency'],
     compute: ({ inputs, broadcast }) => ({ out: broadcast(), mem: inputs.some(Boolean) ? 1 : 0 }),
@@ -126,9 +129,9 @@ export const DEFS: Record<AtomKind, AtomDef> = {
     color: '#d4a373',
     category: 'Wire',
     caption: 'GRIP',
-    ports: ['grip', 'grip', 'grip', 'in'],
+    ports: ['grip', 'grip', null, 'in', null, 'grip'],
     blurb: 'A three-fingered claw. Holds anything until charged, then lets go so the molecule splits in two.',
-    rules: ['Grips bond to any port at all', 'Charge its slot: it releases, splitting the molecule', 'Grips carry no charge'],
+    rules: ['Three front grips bond to any port at all', 'Charge its back slot: it releases, splitting the molecule', 'Grips carry no charge'],
     compute: anyInput,
   },
   and: {
@@ -141,7 +144,7 @@ export const DEFS: Record<AtomKind, AtomDef> = {
     caption: 'AND',
     ports: GATE_PORTS,
     blurb: 'A picky nucleus. Only fires when every bonded slot is charged.',
-    rules: ['ON when all bonded slots are ON', 'Slots on 3 sides, tab on the 4th', '1 tick delay'],
+    rules: ['ON when all bonded slots are ON', 'Slots on its 3 back sides, tab in front', '1 tick delay'],
     compute: ({ inputs }) => inputs.length > 0 && inputs.every(Boolean),
   },
   or: {
@@ -154,7 +157,7 @@ export const DEFS: Record<AtomKind, AtomDef> = {
     caption: 'OR',
     ports: GATE_PORTS,
     blurb: 'An eager nucleus. Any charge on any slot sets it off.',
-    rules: ['ON when any bonded slot is ON', 'Slots on 3 sides, tab on the 4th', '1 tick delay'],
+    rules: ['ON when any bonded slot is ON', 'Slots on its 3 back sides, tab in front', '1 tick delay'],
     compute: anyInput,
   },
   xor: {
@@ -167,7 +170,7 @@ export const DEFS: Record<AtomKind, AtomDef> = {
     caption: 'XOR',
     ports: GATE_PORTS,
     blurb: 'An unstable isotope. Fires on an odd number of charged slots.',
-    rules: ['ON when an odd count of slots are ON', 'Slots on 3 sides, tab on the 4th', '1 tick delay'],
+    rules: ['ON when an odd count of slots are ON', 'Slots on its 3 back sides, tab in front', '1 tick delay'],
     compute: ({ inputs }) => inputs.filter(Boolean).length % 2 === 1,
   },
   not: {
@@ -178,7 +181,7 @@ export const DEFS: Record<AtomKind, AtomDef> = {
     color: '#ff5079',
     category: 'Gate',
     caption: 'NOT',
-    ports: [null, 'out', null, 'in'],
+    ports: INLINE_PORTS,
     blurb: 'Antimatter. Glows when starved, goes dark when fed.',
     rules: ['Inverts its single slot', 'ON when nothing is bonded', 'Loop it into itself to oscillate'],
     compute: ({ inputs }) => !inputs.some(Boolean),
@@ -191,16 +194,16 @@ export const DEFS: Record<AtomKind, AtomDef> = {
     color: '#2ee6c5',
     category: 'Memory',
     caption: 'MEMORY',
-    ports: ['in', 'out', 'in', 'in'],
-    faces: ['reset', 'bit', 'set', 'toggle'],
+    ports: GATE_PORTS,
+    faces: ['bit', undefined, 'set', 'toggle', 'reset'],
     blurb: 'A nucleus that remembers. Holds one bit for as long as you like.',
-    rules: ['W slot flips the bit on each rising edge', 'S slot sets it, N slot resets it', 'Tab outputs the stored bit'],
+    rules: ['Back slot flips the bit on each rising edge', 'Lower back slot sets it, upper back slot resets it', 'Front tab outputs the stored bit'],
     compute: ({ slot, atom }) => {
       const toggle = !!slot(3)
       let bit = atom.mem ?? 0
       if (toggle && !atom.prev) bit = bit ? 0 : 1
       if (slot(2)) bit = 1
-      if (slot(0)) bit = 0
+      if (slot(4)) bit = 0
       return { out: bit === 1, mem: bit, prev: toggle }
     },
   },
@@ -212,7 +215,7 @@ export const DEFS: Record<AtomKind, AtomDef> = {
     color: '#9ad1ff',
     category: 'Memory',
     caption: 'DELAY',
-    ports: [null, 'out', null, 'in'],
+    ports: INLINE_PORTS,
     blurb: 'A pocket of slow time. Whatever goes in comes out later, exactly as it went in.',
     rules: ['Replays its slot N ticks later', 'Delay tunable 1–16 ticks', 'Build rhythms, pulses and timers'],
     compute: ({ inputs, atom }) => {
@@ -229,7 +232,7 @@ export const DEFS: Record<AtomKind, AtomDef> = {
     color: '#eef3ff',
     category: 'Sense',
     caption: 'SENSOR',
-    ports: [null, 'out', 'out', 'out'],
+    ports: [null, 'out', 'out', 'out', 'out', 'out'],
     faces: ['eye'],
     blurb: 'An eye. Stares in one direction and fires when something that is not part of its own body comes into view.',
     rules: ['ON when a foreign atom is within sight', 'Sight range tunable 1–8 cells', 'Its own molecule is transparent to it'],
@@ -243,9 +246,9 @@ export const DEFS: Record<AtomKind, AtomDef> = {
     color: '#fff1a6',
     category: 'Output',
     caption: 'LAMP',
-    ports: ['in', 'in', 'in', 'in'],
+    ports: ['in', 'in', 'in', 'in', 'in', 'in'],
     blurb: 'A photon trap. Lights up the field whenever charge reaches it.',
-    rules: ['Lights when any slot is ON', 'Slots on all four sides', 'Pure output, never drives'],
+    rules: ['Lights when any slot is ON', 'Slots on all six sides', 'Pure output, never drives'],
     compute: anyInput,
   },
   magnetar: {
@@ -282,10 +285,10 @@ export const DEFS: Record<AtomKind, AtomDef> = {
     color: '#ff6b45',
     category: 'Motion',
     caption: 'THRUST',
-    ports: [null, 'in', null, 'in'],
-    faces: ['nose', undefined, 'nozzle'],
+    ports: [null, 'in', 'in', null, 'in', 'in'],
+    faces: ['nose', undefined, undefined, 'nozzle'],
     blurb: 'A tiny engine. Charge it and it drives its whole molecule forward, nose first.',
-    rules: ['Charged: moves its molecule 1 cell toward its nose', 'Works anywhere, no field needed', 'Slots on both flanks'],
+    rules: ['Charged: moves its molecule 1 cell toward its nose', 'Works anywhere, no field needed', 'Slots on all four flanks'],
     compute: anyInput,
   },
   gyron: {
@@ -296,9 +299,9 @@ export const DEFS: Record<AtomKind, AtomDef> = {
     color: '#ff9ecf',
     category: 'Motion',
     caption: 'ROTATE',
-    ports: ['in', 'grip', 'in', 'grip'],
-    blurb: 'A gyroscope. Every pulse turns its entire molecule a quarter turn. This is how creatures steer.',
-    rules: ['Each rising edge turns its molecule 90° clockwise', 'Pivots around itself if there is room', 'Grips on its flanks hold anything'],
+    ports: ['grip', 'in', 'grip', 'in', 'grip', 'in'],
+    blurb: 'A gyroscope. Every pulse turns its entire molecule a sixth of a turn. This is how creatures steer.',
+    rules: ['Each rising edge turns its molecule 60° clockwise', 'Pivots around itself if there is room', 'Grips and slots alternate; grips hold anything'],
     compute: risingEdge,
   },
   fabricator: {
@@ -309,8 +312,8 @@ export const DEFS: Record<AtomKind, AtomDef> = {
     color: '#9dff7a',
     category: 'Life',
     caption: 'COPY',
-    ports: [null, 'in', 'grip', 'in'],
-    faces: ['output', undefined, 'template'],
+    ports: [null, 'in', 'in', 'grip', 'in', 'in'],
+    faces: ['output', undefined, undefined, 'template'],
     blurb: 'A molecular printer. Copies whatever it holds at its back and places the copy in front.',
     rules: ['On each rising edge, copies the atom gripped at its back', 'The copy appears at its front if the cell is free', 'Copies inherit settings: this is reproduction'],
     compute: risingEdge,
@@ -323,7 +326,7 @@ export const DEFS: Record<AtomKind, AtomDef> = {
     color: '#ff2d55',
     category: 'Life',
     caption: 'EAT',
-    ports: [null, 'in', 'in', 'in'],
+    ports: [null, 'in', 'in', 'in', 'in', 'in'],
     faces: ['mouth'],
     blurb: 'A hungry void. When charged it erases whatever sits at its mouth. Give it eyes and it hunts.',
     rules: ['Charged: consumes the atom at its mouth', 'Cannot eat pinned atoms or its own body', 'Pair with an Oculus to hunt'],
@@ -344,7 +347,7 @@ export const PALETTE: { title: string; kinds: AtomKind[] }[] = [
 
 export const isForce = (k: AtomKind) => k === 'magnetar' || k === 'repulsar'
 
-/** Atoms that act toward their canonical north (eye, nose, mouth, output). */
+/** Atoms that act toward their canonical front, side 0 (eye, nose, mouth, output). */
 export const isDirectional = (k: AtomKind) => k === 'oculus' || k === 'propulsor' || k === 'fabricator' || k === 'devourer'
 
 /** Short live readout shown under an atom's symbol. */

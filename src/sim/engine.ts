@@ -1,15 +1,17 @@
 import { DEFS, genesOf, isForce, makeAtom } from './atoms'
 import type { ComputeCtx } from './atoms'
+import { centerOf, DIR, forEachWithin, neighbor, opposite, rotateAbout, SIDES, walk } from './hex'
 import type { Atom, Port, TickEvents, World } from './types'
 
-export const DX = [0, 1, 0, -1]
-export const DY = [-1, 0, 1, 0]
-export const opposite = (side: number) => (side + 2) % 4
+export { opposite }
 export const MAX_ATOMS = 12000
+
+/** Canonical side of an atom that faces world side `side`. */
+export const canonSide = (a: Atom, side: number) => (side - a.rot + 12) % SIDES
 
 /** The port an atom presents on a world-facing side, after rotation and state. */
 export function portAt(a: Atom, side: number): Port {
-  const p = DEFS[a.kind].ports[(side - a.rot + 8) % 4]
+  const p = DEFS[a.kind].ports[canonSide(a, side)]
   // A charged Clasp opens its claws.
   if (p === 'grip' && a.kind === 'clasp' && a.out) return null
   return p
@@ -100,11 +102,10 @@ export function buildGraph(world: World): Graph {
   const bonds: Bond[] = []
   const molUf = new UnionFind(atoms.length)
   for (const a of atoms) {
-    // Only look east and south so every pair is visited once.
-    for (const side of [1, 2]) {
-      const nx = a.x + DX[side]
-      const ny = a.y + DY[side]
-      if (nx >= cols || ny >= rows) continue
+    // Only look E, SE and SW so every pair is visited once.
+    for (const side of [0, 1, 2]) {
+      const [nx, ny] = neighbor(a.x, a.y, side)
+      if (nx < 0 || nx >= cols || ny >= rows) continue
       const bid = occ.get(cellKey(world, nx, ny))
       if (!bid) continue
       const b = byId.get(bid)!
@@ -177,7 +178,7 @@ export function step(world: World, events: TickEvents = emptyEvents()): World {
       if (l.mine !== 'in' || l.theirs === 'grip') continue
       const v = read(l)
       inputs.push(v)
-      bySide[(l.side - a.rot + 8) % 4] = v
+      bySide[canonSide(a, l.side)] = v
     }
     const ctx: ComputeCtx = {
       inputs,
@@ -206,8 +207,7 @@ function patch(a: Atom, p: Partial<Atom>): Atom {
 function lookAhead(world: World, g: Graph, a: Atom, range: number): boolean {
   const mine = g.molOf.get(a.id)
   for (let k = 1; k <= range; k++) {
-    const x = a.x + DX[a.rot] * k
-    const y = a.y + DY[a.rot] * k
+    const [x, y] = walk(a.x, a.y, a.rot, k)
     if (x < 0 || y < 0 || x >= world.cols || y >= world.rows) return false
     const id = g.occ.get(cellKey(world, x, y))
     if (id && g.molOf.get(id) !== mine) return true
@@ -219,7 +219,7 @@ function lookAhead(world: World, g: Graph, a: Atom, range: number): boolean {
  * Motion, in priority order. A molecule moves at most once per tick.
  *
  *  1. Thrust: charged Propulsors drive their molecule toward their nose.
- *  2. Spin: a Gyron pulse turns its molecule 90° clockwise about the Gyron.
+ *  2. Spin: a Gyron pulse turns its molecule 60° clockwise about the Gyron.
  *  3. Fields: every active Magnetar / Repulsar acts on *other* molecules only.
  *     Because that is not reciprocal, attractors and repellers chase each
  *     other. A molecule slides one cell in whichever direction most lowers its
@@ -239,11 +239,10 @@ function applyPhysics(world: World, atoms: Atom[], g: Graph, events: TickEvents)
   const mobile = (mol: string[]) => !mol.some((id) => pos.get(id)!.pinned)
   const isLoose = (mol: string[]) => mol.length === 1 && g.links.get(mol[0])!.length === 0
 
-  const blocked = (mol: string[], members: Set<string>, dx: number, dy: number) =>
+  const blocked = (mol: string[], members: Set<string>, side: number) =>
     mol.some((id) => {
       const a = pos.get(id)!
-      const nx = a.x + dx
-      const ny = a.y + dy
+      const [nx, ny] = neighbor(a.x, a.y, side)
       if (!inBounds(nx, ny)) return true
       const o = occ.get(cellKey(world, nx, ny))
       return o !== undefined && !members.has(o)
@@ -260,16 +259,19 @@ function applyPhysics(world: World, atoms: Atom[], g: Graph, events: TickEvents)
       occ.set(cellKey(world, n.x, n.y), id)
     }
   }
-  const shift = (mol: string[], side: number) => relocate(mol, (a) => ({ ...a, x: a.x + DX[side], y: a.y + DY[side] }))
+  const shift = (mol: string[], side: number) =>
+    relocate(mol, (a) => {
+      const [x, y] = neighbor(a.x, a.y, side)
+      return { ...a, x, y }
+    })
 
   /** Rotate a lone atom to the first orientation that bonds with a neighbour. */
   const dock = (id: string) => {
     const a = pos.get(id)!
-    for (let turn = 1; turn < 4; turn++) {
-      const spun = { ...a, rot: (a.rot + turn) % 4 }
-      const fits = [0, 1, 2, 3].some((side) => {
-        const nx = a.x + DX[side]
-        const ny = a.y + DY[side]
+    for (let turn = 1; turn < SIDES; turn++) {
+      const spun = { ...a, rot: (a.rot + turn) % SIDES }
+      const fits = [0, 1, 2, 3, 4, 5].some((side) => {
+        const [nx, ny] = neighbor(a.x, a.y, side)
         if (!inBounds(nx, ny)) return false
         const o = occ.get(cellKey(world, nx, ny))
         return o !== undefined && canBond(portAt(spun, side), portAt(pos.get(o)!, opposite(side)))
@@ -289,15 +291,17 @@ function applyPhysics(world: World, atoms: Atom[], g: Graph, events: TickEvents)
     if (a.kind !== 'propulsor' || !a.out) continue
     const mi = g.molOf.get(a.id)!
     const v = thrust.get(mi) ?? [0, 0]
-    v[0] += DX[a.rot]
-    v[1] += DY[a.rot]
+    v[0] += DIR[a.rot][0]
+    v[1] += DIR[a.rot][1]
     thrust.set(mi, v)
   }
   for (const [mi, [vx, vy]] of thrust) {
     const mol = g.molecules[mi]
-    if ((vx === 0 && vy === 0) || !mobile(mol)) continue
-    const side = Math.abs(vx) >= Math.abs(vy) ? (vx > 0 ? 1 : 3) : vy > 0 ? 2 : 0
-    if (blocked(mol, new Set(mol), DX[side], DY[side])) continue
+    if (Math.hypot(vx, vy) < 1e-6 || !mobile(mol)) continue
+    // Opposed engines cancel; otherwise go the hex direction closest to the net thrust.
+    let side = 0
+    for (let s = 1; s < SIDES; s++) if (DIR[s][0] * vx + DIR[s][1] * vy > DIR[side][0] * vx + DIR[side][1] * vy) side = s
+    if (blocked(mol, new Set(mol), side)) continue
     shift(mol, side)
     moved.add(mi)
     events.thrusts++
@@ -311,7 +315,10 @@ function applyPhysics(world: World, atoms: Atom[], g: Graph, events: TickEvents)
     if (!mobile(mol)) continue
     const p = pos.get(a.id)!
     const members = new Set(mol)
-    const target = (b: Atom) => ({ x: p.x - (b.y - p.y), y: p.y + (b.x - p.x) })
+    const target = (b: Atom) => {
+      const [x, y] = rotateAbout(p.x, p.y, b.x, b.y)
+      return { x, y }
+    }
     const clear = mol.every((id) => {
       const t = target(pos.get(id)!)
       if (!inBounds(t.x, t.y)) return false
@@ -319,7 +326,7 @@ function applyPhysics(world: World, atoms: Atom[], g: Graph, events: TickEvents)
       return o === undefined || members.has(o)
     })
     if (!clear) continue
-    relocate(mol, (b) => ({ ...b, ...target(b), rot: (b.rot + 1) % 4 }))
+    relocate(mol, (b) => ({ ...b, ...target(b), rot: (b.rot + 1) % SIDES }))
     moved.add(mi)
     events.spins++
   }
@@ -334,33 +341,30 @@ function applyPhysics(world: World, atoms: Atom[], g: Graph, events: TickEvents)
       const r = f.radius ?? 5
       const own = g.molOf.get(f.id)
       const seen = new Set<number>()
-      for (let dy = -r; dy <= r; dy++) {
-        for (let dx = -r; dx <= r; dx++) {
-          const d2 = dx * dx + dy * dy
-          if (d2 > r * r) continue
-          const x = f.x + dx
-          const y = f.y + dy
-          if (!inBounds(x, y)) continue
-          const id = g.occ.get(cellKey(world, x, y))
-          if (!id) continue
-          const mi = g.molOf.get(id)!
-          if (mi === own || moved.has(mi)) continue
-          reach.set(mi, Math.min(reach.get(mi) ?? Infinity, Math.sqrt(d2)))
-          if (seen.has(mi)) continue
-          seen.add(mi)
-          const list = acting.get(mi)
-          if (list) list.push(f)
-          else acting.set(mi, [f])
-        }
-      }
+      forEachWithin(f.x, f.y, r, world.cols, world.rows, (x, y, d) => {
+        const id = g.occ.get(cellKey(world, x, y))
+        if (!id) return
+        const mi = g.molOf.get(id)!
+        if (mi === own || moved.has(mi)) return
+        reach.set(mi, Math.min(reach.get(mi) ?? Infinity, d))
+        if (seen.has(mi)) return
+        seen.add(mi)
+        const list = acting.get(mi)
+        if (list) list.push(f)
+        else acting.set(mi, [f])
+      })
     }
 
-    const energy = (mol: string[], fs: Atom[], dx: number, dy: number) => {
+    // Field energy if the molecule slid one cell across `side` (-1: stays put).
+    const energy = (mol: string[], fs: Atom[], side: number) => {
+      const [dx, dy] = side < 0 ? [0, 0] : DIR[side]
       let e = 0
       for (const id of mol) {
         const a = pos.get(id)!
+        const [ax, ay] = centerOf(a.x, a.y)
         for (const f of fs) {
-          const d = Math.hypot(f.x - (a.x + dx), f.y - (a.y + dy))
+          const [fx, fy] = centerOf(f.x, f.y)
+          const d = Math.hypot(fx - (ax + dx), fy - (ay + dy))
           e += f.kind === 'magnetar' ? d : -d
         }
       }
@@ -375,10 +379,10 @@ function applyPhysics(world: World, atoms: Atom[], g: Graph, events: TickEvents)
       const fs = acting.get(mi)!
       const members = new Set(mol)
       let best = -1
-      let bestE = energy(mol, fs, 0, 0) - 1e-6
-      for (let side = 0; side < 4; side++) {
-        if (blocked(mol, members, DX[side], DY[side])) continue
-        const e = energy(mol, fs, DX[side], DY[side])
+      let bestE = energy(mol, fs, -1) - 1e-6
+      for (let side = 0; side < SIDES; side++) {
+        if (blocked(mol, members, side)) continue
+        const e = energy(mol, fs, side)
         if (e < bestE) {
           bestE = e
           best = side
@@ -400,8 +404,8 @@ function applyPhysics(world: World, atoms: Atom[], g: Graph, events: TickEvents)
       if (moved.has(mi) || !mobile(mol)) return
       if (isLoose(mol) && Math.random() < heat && dock(mol[0])) return
       if (Math.random() >= heat / Math.sqrt(mol.length)) return
-      const side = Math.floor(Math.random() * 4)
-      if (!blocked(mol, new Set(mol), DX[side], DY[side])) shift(mol, side)
+      const side = Math.floor(Math.random() * SIDES)
+      if (!blocked(mol, new Set(mol), side)) shift(mol, side)
     })
   }
 
@@ -420,8 +424,7 @@ function applyLife(world: World, atoms: Atom[], g: Graph, events: TickEvents): A
 
   for (const d of eaters) {
     if (eaten.has(d.id)) continue
-    const mx = d.x + DX[d.rot]
-    const my = d.y + DY[d.rot]
+    const [mx, my] = neighbor(d.x, d.y, d.rot)
     const prey = inBounds(mx, my) ? at.get(cellKey(world, mx, my)) : undefined
     if (!prey || prey.pinned || g.molOf.get(prey.id) === g.molOf.get(d.id)) continue
     eaten.add(prey.id)
@@ -433,12 +436,9 @@ function applyLife(world: World, atoms: Atom[], g: Graph, events: TickEvents): A
   let count = atoms.length - eaten.size
   for (const f of makers) {
     if (eaten.has(f.id) || count >= MAX_ATOMS) continue
-    const back = opposite(f.rot)
-    const bx = f.x + DX[back]
-    const by = f.y + DY[back]
+    const [bx, by] = neighbor(f.x, f.y, opposite(f.rot))
     const tpl = inBounds(bx, by) ? at.get(cellKey(world, bx, by)) : undefined
-    const fx = f.x + DX[f.rot]
-    const fy = f.y + DY[f.rot]
+    const [fx, fy] = neighbor(f.x, f.y, f.rot)
     if (!tpl || !inBounds(fx, fy) || at.has(cellKey(world, fx, fy))) continue
     const child = makeAtom(tpl.kind, fx, fy, tpl.rot, genesOf(tpl))
     born.push(child)
