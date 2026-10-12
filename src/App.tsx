@@ -27,6 +27,7 @@ import { exportProject, importProject, MAX_PROJECT_BYTES, ProjectError } from '.
 import type { Project } from './sim/project'
 import type { Atom, AtomKind, TickEvents, World } from './sim/types'
 import './App.css'
+import './workspace.css'
 
 /** A dragged atom and its axial offset from the atom under the pointer. */
 interface DragItem {
@@ -146,6 +147,8 @@ export default function App() {
   const [solvedMap, setSolvedMap] = useState<Record<string, number>>(() => readJSON<{ solved: Record<string, number> }>(CHALLENGE_KEY)?.solved ?? {})
   const [verdict, setVerdict] = useState<Verdict | null>(null)
   const [listOpen, setListOpen] = useState(false)
+  const [paletteOpen, setPaletteOpen] = useState(() => window.innerWidth > 640)
+  const [inspectorOpen, setInspectorOpen] = useState(() => window.innerWidth > 1100)
   const [fileDrag, setFileDrag] = useState(false)
 
   const hostRef = useRef<HTMLDivElement>(null)
@@ -645,6 +648,7 @@ export default function App() {
       const t = e.target as HTMLElement
       if (t.tagName === 'INPUT' || t.tagName === 'SELECT' || t.tagName === 'TEXTAREA') return
       const k = e.key.toLowerCase()
+      if ((k === ' ' || k === 'enter') && t.closest('button, summary')) return
       // Modifier shortcuts are file commands; never let them fall through to the single-key ones (⌘C, ⌘R…).
       if (e.metaKey || e.ctrlKey || e.altKey) {
         if ((e.metaKey || e.ctrlKey) && k === 's') {
@@ -732,6 +736,10 @@ export default function App() {
     <div className={`app${drag ? ' is-dragging' : ''}`}>
       <div className="backdrop" aria-hidden />
       <TopBar
+        paletteOpen={paletteOpen}
+        inspectorOpen={inspectorOpen}
+        onTogglePalette={() => { setPaletteOpen((v) => !v); if (window.innerWidth <= 760) setInspectorOpen(false) }}
+        onToggleInspector={() => { setInspectorOpen((v) => !v); if (window.innerWidth <= 760) setPaletteOpen(false) }}
         running={running}
         tps={tps}
         heat={world.heat ?? 0}
@@ -768,8 +776,8 @@ export default function App() {
           if (file) void importFile(file)
         }}
       />
-      <main className="workspace">
-        <Palette panelRef={paletteRef} dissolve={!!drag && drag.from === 'field' && drag.overPalette} limits={limits} onGrab={grabFromPalette} />
+      <main className={`workspace${paletteOpen ? "" : " palette-hidden"}${inspectorOpen ? "" : " inspector-hidden"}`}>
+        <Palette onClose={() => setPaletteOpen(false)} panelRef={paletteRef} dissolve={!!drag && drag.from === 'field' && drag.overPalette} limits={limits} onGrab={grabFromPalette} />
         <section className="stage">
           <GpuField
             scene={fieldScene}
@@ -822,7 +830,7 @@ export default function App() {
             </span>
           </div>
         </section>
-        <Inspector atom={selected} graph={graph} onPatch={patchAtom} onRotate={rotateAtom} onDelete={deleteAtom} onPinMolecule={pinMolecule} turnsLeft={turnsLeft} />
+        <Inspector onClose={() => setInspectorOpen(false)} atom={selected} graph={graph} onPatch={patchAtom} onRotate={rotateAtom} onDelete={deleteAtom} onPinMolecule={pinMolecule} turnsLeft={turnsLeft} />
       </main>
 
       {drag && !drag.cell && (

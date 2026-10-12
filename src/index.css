@@ -1,18 +1,19 @@
 :root {
-  --bg: #04070f;
-  --panel: rgba(11, 17, 34, 0.82);
-  --panel-edge: rgba(120, 170, 255, 0.14);
-  --text: #dbe5ff;
-  --muted: #7584ab;
-  --accent: #38e8ff;
+  --bg: #0c1017;
+  --panel: #121821;
+  --panel-edge: #26303d;
+  --text: #e2e8f0;
+  --muted: #95a3b7;
+  --accent: #78dccc;
   --accent-2: #ff6ee0;
   --signal: #ffe14d;
   --danger: #ff4f6d;
-  --font-display: 'Orbitron', 'Eurostile', system-ui, sans-serif;
+  --font-display: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font-ui: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
 
   color-scheme: dark;
-  font-family: var(--font-mono);
+  font-family: var(--font-ui);
   color: var(--text);
   background: var(--bg);
   -webkit-font-smoothing: antialiased;
@@ -52,3 +53,6 @@ select {
 ::-webkit-scrollbar-track {
   background: transparent;
 }
+
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+button, select, input { -webkit-tap-highlight-color: transparent; }

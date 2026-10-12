@@ -1,3 +1,5 @@
+import { useState } from 'react'
+import { Icon } from './Icon'
 import type { PointerEvent as ReactPointerEvent, Ref } from 'react'
 import { DEFS, makeAtom, PALETTE } from '../sim/atoms'
 import type { AtomKind } from '../sim/types'
@@ -14,26 +16,36 @@ export interface PartLimits {
 }
 
 interface Props {
+  onClose: () => void
   panelRef: Ref<HTMLElement>
   dissolve: boolean
   limits: PartLimits | null
   onGrab: (kind: AtomKind, e: ReactPointerEvent) => void
 }
 
-export function Palette({ panelRef, dissolve, limits, onGrab }: Props) {
+export function Palette({ onClose, panelRef, dissolve, limits, onGrab }: Props) {
+  const [query, setQuery] = useState('')
+  const [category, setCategory] = useState('All')
   // A challenge offers only its own parts, in palette order.
   const groups = limits ? PALETTE.map((g) => ({ ...g, kinds: g.kinds.filter((k) => (limits.budget[k] ?? 0) > 0) })).filter((g) => g.kinds.length) : PALETTE
+  const visible = groups.filter((g) => category === 'All' || g.title === category).map((g) => ({ ...g, kinds: g.kinds.filter((k) => `${DEFS[k].name} ${DEFS[k].caption} ${DEFS[k].blurb}`.toLowerCase().includes(query.trim().toLowerCase())) })).filter((g) => g.kinds.length)
+  const count = groups.reduce((n, g) => n + g.kinds.length, 0)
   return (
     <aside ref={panelRef} className={`panel palette${dissolve ? ' dissolve' : ''}`}>
       <header className="panel-head">
-        <span className="panel-title">{limits ? 'Your parts' : 'Elements'}</span>
-        <span className="panel-sub">{limits ? 'this challenge allows only these' : 'drag onto the field'}</span>
+        <div className="panel-heading"><span className="panel-title">{limits ? 'Your parts' : 'Elements'} <span className="count-badge">{count}</span></span><button className="btn icon-btn panel-close" onClick={onClose} aria-label="Close elements panel"><Icon name="left" size={15} /></button></div>
+        <span className="panel-sub">{limits ? 'Your toolkit for this challenge' : 'Small pieces. Endless possibilities.'}</span>
       </header>
+      <div className="palette-tools">
+        <div className="search-box"><Icon name="search" size={15} /><input aria-label="Search elements" placeholder="Find an element…" value={query} onChange={(e) => setQuery(e.target.value)} />{query && <button aria-label="Clear search" onClick={() => setQuery('')}><Icon name="close" size={13} /></button>}</div>
+        <select aria-label="Element category" value={category} onChange={(e) => setCategory(e.target.value)}><option value="All">All categories</option>{PALETTE.map((g) => <option key={g.title}>{g.title}</option>)}</select>
+      </div>
       <div className="palette-scroll">
         {limits && !groups.length && <p className="palette-empty">No parts in this one. Turn the pieces marked ↻ instead: R or right-click, and Shift to turn back.</p>}
-        {groups.map((group) => (
+        {!visible.length && !!groups.length && <div className="palette-empty"><b>No elements found</b><p>Try another name or category.</p><button className="btn" onClick={() => { setQuery(''); setCategory('All') }}>Reset filters</button></div>}
+        {visible.map((group) => (
           <section key={group.title} className="palette-group">
-            <h3>{group.title}</h3>
+            <h3>{group.title}<span>{group.kinds.length}</span></h3>
             <div className="palette-grid">
               {group.kinds.map((kind) => {
                 const def = DEFS[kind]
@@ -61,6 +73,7 @@ export function Palette({ panelRef, dissolve, limits, onGrab }: Props) {
           </section>
         ))}
       </div>
+      <footer className="panel-footer"><span className="drag-dot">⠿</span> Drag an element onto the field</footer>
       <div className="dissolve-zone">
         <span>Release to dissolve</span>
       </div>

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
+import { Icon } from './Icon'
 import { MAX_SIZE, MIN_SIZE, SCENES, SIZE_PRESETS } from '../sim/demos'
 import type { Size } from '../sim/demos'
 
@@ -14,6 +15,10 @@ export interface Stats {
 
 
 interface Props {
+  paletteOpen: boolean
+  inspectorOpen: boolean
+  onTogglePalette: () => void
+  onToggleInspector: () => void
   running: boolean
   tps: number
   heat: number
@@ -42,71 +47,48 @@ export function TopBar(p: Props) {
   const scene = SCENES.find((s) => s.id === p.sceneId)
   return (
     <header className="topbar">
-      <div className="brand">
-        <svg className="brand-mark" viewBox="-20 -20 40 40" width="34" height="34">
-          <ellipse rx="17" ry="6.5" className="orbit" />
-          <ellipse rx="17" ry="6.5" className="orbit" transform="rotate(60)" />
-          <ellipse rx="17" ry="6.5" className="orbit" transform="rotate(-60)" />
-          <circle r="4" className="nucleus" />
-        </svg>
-        <div>
-          <h1>
-            ATOM<span>FORGE</span>
-          </h1>
-          <p>molecular logic sandbox</p>
+      <div className="topbar-main">
+        <div className="brand">
+          <svg className="brand-mark" viewBox="-20 -20 40 40" width="32" height="32" aria-hidden="true">
+            <ellipse rx="17" ry="6.5" className="orbit" />
+            <ellipse rx="17" ry="6.5" className="orbit" transform="rotate(60)" />
+            <ellipse rx="17" ry="6.5" className="orbit" transform="rotate(-60)" />
+            <circle r="4" className="nucleus" />
+          </svg>
+          <div><h1>Atom<span>forge</span></h1><p>Molecular playground</p></div>
+        </div>
+        <div className="scene-picker">
+          <span className="toolbar-label">Scene</span>
+          <select aria-label="Scene" value={p.sceneId} onChange={(e) => p.onScene(e.target.value)} title={scene?.hint}>
+            {p.sceneId === 'custom' && <option value="custom">Your build</option>}
+            {p.sceneId === 'challenge' && <option value="challenge">{p.challengeTitle}</option>}
+            {SCENES.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+          </select>
+          <button className="btn icon-btn" onClick={() => p.onScene(p.sceneId === 'custom' ? 'empty' : p.sceneId)} title={p.sceneId === 'custom' ? 'Clear scene' : 'Restart scene'} aria-label={p.sceneId === 'custom' ? 'Clear scene' : 'Restart scene'}><Icon name="reset" /></button>
+        </div>
+        <div className="topbar-end"><ProjectMenu onExport={p.onExport} onImport={p.onImport} />{p.end}</div>
+      </div>
+      <div className="command-bar">
+        <div className="transport">
+          <button className={`btn play${p.running ? ' running' : ''}`} onClick={p.onToggleRun} title="Run or pause (Space)">
+            <Icon name={p.running ? 'pause' : 'play'} />{p.running ? 'Pause' : 'Run'}<kbd>Space</kbd>
+          </button>
+          <button className="btn step-btn" onClick={p.onStep} disabled={p.running} title="Step one tick (.)"><Icon name="step" /> Step</button>
+          <span className="toolbar-divider" />
+          <label className="speed"><span>Speed <b>{p.tps}<small> t/s</small></b></span><input aria-label="Simulation speed" type="range" min={1} max={30} value={p.tps} onChange={(e) => p.onTps(+e.target.value)} /></label>
+          <label className={`speed heat${p.heat > 0 ? ' warm' : ''}`} title={p.challengeTitle ? 'Heat is fixed during a challenge' : 'Random thermal motion for unpinned molecules'}>
+            <span>Heat <b>{Math.round(p.heat * 100)}<small>°</small></b></span><input aria-label="Heat" type="range" min={0} max={0.3} step={0.01} value={p.heat} disabled={!!p.challengeTitle} onChange={(e) => p.onHeat(+e.target.value)} />
+          </label>
+        </div>
+        <div className="view-controls">
+          <button className={`btn fields-btn${p.showFields ? ' active' : ''}`} onClick={p.onToggleFields} title="Show force fields (V)" aria-pressed={p.showFields}><Icon name="field" /><span>Fields</span></button>
+          <SizeMenu size={p.size} backend={p.backend} preferWebGL={p.preferWebGL} onResize={p.onResize} onPreferWebGL={p.onPreferWebGL} />
+          <button className="btn icon-btn" onClick={p.onFit} title="Fit view (F)" aria-label="Fit view"><Icon name="fit" /></button>
+          <span className="toolbar-divider" />
+          <button className={`btn icon-btn${p.paletteOpen ? ' active' : ''}`} onClick={p.onTogglePalette} aria-label="Toggle elements panel" aria-pressed={p.paletteOpen} title="Toggle elements panel"><Icon name="left" /></button>
+          <button className={`btn icon-btn${p.inspectorOpen ? ' active' : ''}`} onClick={p.onToggleInspector} aria-label="Toggle inspector panel" aria-pressed={p.inspectorOpen} title="Toggle inspector panel"><Icon name="right" /></button>
         </div>
       </div>
-
-      <div className="transport">
-        <button className={`btn play${p.running ? ' running' : ''}`} onClick={p.onToggleRun} title="Space">
-          {p.running ? '❚❚ Pause' : '▶ Run'}
-        </button>
-        <button className="btn" onClick={p.onStep} disabled={p.running} title="Step one tick (.)">
-          ⏭<span className="lbl"> Step</span>
-        </button>
-        <label className="speed" title="Simulation speed (ticks per second)">
-          <span>{p.tps} t/s</span>
-          <input type="range" min={1} max={30} value={p.tps} onChange={(e) => p.onTps(+e.target.value)} />
-        </label>
-        <label
-          className={`speed heat${p.heat > 0 ? ' warm' : ''}`}
-          title={p.challengeTitle ? 'Heat is fixed during a challenge' : 'Heat: random thermal jiggle for unpinned molecules'}
-        >
-          <span>{p.heat > 0 ? `${Math.round(p.heat * 100)}°` : 'cold'}</span>
-          <input type="range" min={0} max={0.3} step={0.01} value={p.heat} disabled={!!p.challengeTitle} onChange={(e) => p.onHeat(+e.target.value)} />
-        </label>
-        <button
-          className={`btn fields-btn${p.showFields ? ' active' : ''}`}
-          onClick={p.onToggleFields}
-          title="Show or hide attraction / repulsion fields (V)"
-          aria-pressed={p.showFields}
-        >
-          ◎<span className="lbl"> Fields</span>
-        </button>
-      </div>
-
-      <div className="scene-picker">
-        <select value={p.sceneId} onChange={(e) => p.onScene(e.target.value)} title={scene?.hint}>
-          {p.sceneId === 'custom' && <option value="custom">Your build</option>}
-          {p.sceneId === 'challenge' && <option value="challenge">◆ {p.challengeTitle}</option>}
-          {SCENES.map((s) => (
-            <option key={s.id} value={s.id}>
-              {s.name}
-            </option>
-          ))}
-        </select>
-        <button className="btn" onClick={() => p.onScene(p.sceneId === 'custom' ? 'empty' : p.sceneId)} title="Reload scene (reseeds the soup)">
-          ↺<span className="lbl"> {p.sceneId === 'custom' ? 'Clear' : p.sceneId === 'challenge' ? 'Restart' : 'Reload'}</span>
-        </button>
-        <SizeMenu size={p.size} backend={p.backend} preferWebGL={p.preferWebGL} onResize={p.onResize} onPreferWebGL={p.onPreferWebGL} />
-        <ProjectMenu onExport={p.onExport} onImport={p.onImport} />
-        <button className="btn ghost-btn" onClick={p.onFit} title="Fit view (F)">
-          ⤢
-        </button>
-      </div>
-
-      <div className="topbar-end">{p.end}</div>
-
     </header>
   )
 }
@@ -122,8 +104,10 @@ function usePopover() {
     const close = (e: PointerEvent) => {
       if (!ref.current?.contains(e.target as Node)) setOpen(false)
     }
+    const escape = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false) }
     window.addEventListener('pointerdown', close)
-    return () => window.removeEventListener('pointerdown', close)
+    window.addEventListener('keydown', escape)
+    return () => { window.removeEventListener('pointerdown', close); window.removeEventListener('keydown', escape) }
   }, [open])
   return { open, setOpen, ref }
 }
@@ -132,8 +116,8 @@ function ProjectMenu({ onExport, onImport }: { onExport: () => void; onImport: (
   const { open, setOpen, ref } = usePopover()
   return (
     <div className="menu-anchor" ref={ref}>
-      <button className={`btn${open ? ' active' : ''}`} onClick={() => setOpen((o) => !o)} title="Save or open a project file">
-        ⇅<span className="lbl"> Project</span>
+      <button className={`btn${open ? ' active' : ''}`} onClick={() => setOpen((o) => !o)} title="Save or open a project file" aria-expanded={open}>
+        <Icon name="folder" /><span>Project</span>
       </button>
       {open && (
         <div className="popover project-pop">
@@ -197,8 +181,9 @@ function SizeMenu({
           setOpen((o) => !o)
         }}
         title="Field size"
+        aria-expanded={open}
       >
-        ▦ {size.cols}×{size.rows}
+        <Icon name="grid" /> {size.cols} × {size.rows}
       </button>
       {open && (
         <div className="popover">
@@ -215,9 +200,9 @@ function SizeMenu({
             ))}
           </div>
           <div className="size-custom">
-            <input type="number" min={MIN_SIZE.cols} max={MAX_SIZE.cols} value={draft.cols} onChange={(e) => setDraft({ ...draft, cols: +e.target.value })} />
+            <input aria-label="Field columns" type="number" min={MIN_SIZE.cols} max={MAX_SIZE.cols} value={draft.cols} onChange={(e) => setDraft({ ...draft, cols: +e.target.value })} />
             <span>×</span>
-            <input type="number" min={MIN_SIZE.rows} max={MAX_SIZE.rows} value={draft.rows} onChange={(e) => setDraft({ ...draft, rows: +e.target.value })} />
+            <input aria-label="Field rows" type="number" min={MIN_SIZE.rows} max={MAX_SIZE.rows} value={draft.rows} onChange={(e) => setDraft({ ...draft, rows: +e.target.value })} />
             <button className="btn" onClick={() => apply(draft)}>
               Apply
             </button>
@@ -241,7 +226,7 @@ function SizeMenu({
   )
 }
 
-/** Live counters overlaid on the field, top-right. */
+/** Live counters docked at the bottom of the field. */
 export function StatsHud({ stats, fps, backend }: { stats: Stats; fps: number; backend: string }) {
   return (
     <div className="stats">

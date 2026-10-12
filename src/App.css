@@ -900,64 +900,6 @@ kbd {
 
 /* ───────────────────────── Responsive ───────────────────────── */
 
-/* The top bar stays on one row by shedding detail as the window narrows. */
-@media (max-width: 1560px) {
-  .brand p {
-    display: none;
-  }
-  .topbar {
-    gap: 10px 14px;
-  }
-}
-@media (max-width: 1440px) {
-  .topbar input[type='range'] {
-    width: 64px;
-  }
-  .speed span {
-    min-width: 34px;
-  }
-  .scene-picker select {
-    max-width: 150px;
-  }
-}
-@media (max-width: 1500px) {
-  .topbar .btn .lbl {
-    display: none;
-  }
-  .topbar {
-    padding: 10px 14px;
-  }
-}
-@media (max-width: 1200px) {
-  .brand h1 {
-    display: none;
-  }
-  .challenge-btn small {
-    display: none;
-  }
-}
-
-@media (max-width: 1280px) {
-  .workspace {
-    grid-template-columns: 236px minmax(0, 1fr) 270px;
-  }
-  .stats .stat:nth-child(3),
-  .stats .stat:nth-child(1) {
-    display: none;
-  }
-}
-@media (max-width: 960px) {
-  .workspace {
-    grid-template-columns: 236px minmax(0, 1fr);
-  }
-  .inspector {
-    display: none;
-  }
-  .hint-bar {
-    display: none;
-  }
-}
-
 /* Toasts */
 .toasts {
   position: absolute;

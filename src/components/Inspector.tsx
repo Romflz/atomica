@@ -1,3 +1,5 @@
+import { useState } from 'react'
+import { Icon } from './Icon'
 import { CHANNEL_COLORS, DEFS, isForce, SIGNAL } from '../sim/atoms'
 import { canonSide } from '../sim/engine'
 import type { Graph } from '../sim/engine'
@@ -6,6 +8,7 @@ import type { Atom, AtomKind } from '../sim/types'
 import { AtomIcon } from './AtomView'
 
 interface Props {
+  onClose?: () => void
   atom: Atom | null
   graph: Graph
   onPatch: (id: string, patch: Partial<Atom>) => void
@@ -45,14 +48,38 @@ function stateOf(a: Atom): string {
   }
 }
 
-export function Inspector({ atom, graph, onPatch, onRotate, onDelete, onPinMolecule, turnsLeft }: Props) {
+export function Inspector({ atom, graph, onPatch, onRotate, onDelete, onPinMolecule, turnsLeft, onClose }: Props) {
+  const [guideFor, setGuideFor] = useState<string | null | undefined>(undefined)
+  const showGuide = guideFor === (atom?.id ?? null)
   return (
     <aside className="panel inspector">
       <header className="panel-head">
-        <span className="panel-title">{atom ? 'Inspector' : 'Field Guide'}</span>
-        <span className="panel-sub">{atom ? DEFS[atom.kind].category : 'how matter behaves here'}</span>
+        <div className="panel-heading"><span className="panel-title">Workbench</span><button className="btn icon-btn panel-close" onClick={onClose} aria-label="Close inspector panel"><Icon name="right" size={15} /></button></div>
+        <span className="panel-sub">Explore, understand, experiment.</span>
       </header>
-      <div className="inspector-scroll">{atom ? <AtomDetails atom={atom} graph={graph} {...{ onPatch, onRotate, onDelete, onPinMolecule, turnsLeft }} /> : <FieldGuide />}</div>
+      <div
+        className="inspector-tabs"
+        role="tablist"
+        aria-label="Workbench view"
+        onKeyDown={(e) => {
+          if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) return
+          e.preventDefault()
+          const nextGuide = e.key === 'Home' ? false : e.key === 'End' ? true : !showGuide
+          setGuideFor(nextGuide ? atom?.id ?? null : undefined)
+          e.currentTarget.querySelectorAll<HTMLButtonElement>('[role="tab"]')[nextGuide ? 1 : 0]?.focus()
+        }}
+      >
+        <button role="tab" id="inspect-tab" aria-controls="workbench-content" aria-selected={!showGuide} tabIndex={showGuide ? -1 : 0} onClick={() => setGuideFor(undefined)}>Inspector{atom && <i />}</button>
+        <button role="tab" id="guide-tab" aria-controls="workbench-content" aria-selected={showGuide} tabIndex={showGuide ? 0 : -1} onClick={() => setGuideFor(atom?.id ?? null)}><Icon name="book" size={14} /> Field guide</button>
+      </div>
+      <div className="inspector-scroll" id="workbench-content" role="tabpanel" aria-labelledby={showGuide ? 'guide-tab' : 'inspect-tab'}>
+        {showGuide ? <FieldGuide /> : atom ? <AtomDetails atom={atom} graph={graph} {...{ onPatch, onRotate, onDelete, onPinMolecule, turnsLeft }} /> : <div className="inspector-empty">
+          <div className="empty-orbit"><Icon name="field" size={38} /></div><h2>A closer look</h2><p>Select an atom on the field to inspect its ports, tune its behavior, and explore its molecule.</p>
+          <button className="btn wide" onClick={() => setGuideFor(null)}><Icon name="book" /> Open field guide <Icon name="chevron" size={13} /></button>
+          <div className="quick-start"><span className="eyebrow">MAKE YOUR FIRST CONNECTION</span><p><b>01</b> Drag a Spark onto the field</p><p><b>02</b> Connect a Conduit and a Lumen</p><p><b>03</b> Switch on the Spark, then run</p></div>
+        </div>}
+      </div>
+      <footer className="panel-footer"><kbd>R</kbd> Rotate <span>·</span> <kbd>P</kbd> Pin <span>·</span> <kbd>Del</kbd> Remove</footer>
     </aside>
   )
 }
@@ -101,11 +128,11 @@ function AtomDetails({ atom, graph, onPatch, onRotate, onDelete, onPinMolecule, 
       )}
 
       {lock !== 'fixed' && (
-        <div className="btn-row">
-          <button className="btn" onClick={() => onRotate(atom.id)} title="Rotate 60° clockwise (R)">
+        <div className="btn-row" aria-label="Atom actions">
+          <button className="btn" onClick={() => onRotate(atom.id)} aria-label="Rotate clockwise" title="Rotate 60° clockwise (R)">
             ⟳ <kbd>R</kbd>
           </button>
-          <button className="btn" onClick={() => onRotate(atom.id, -1)} title="Rotate 60° back (Shift+R)">
+          <button className="btn" onClick={() => onRotate(atom.id, -1)} aria-label="Rotate counterclockwise" title="Rotate 60° back (Shift+R)">
             ⟲ <kbd>⇧R</kbd>
           </button>
           {!lock && (
@@ -114,7 +141,7 @@ function AtomDetails({ atom, graph, onPatch, onRotate, onDelete, onPinMolecule, 
             </button>
           )}
           {!lock && (
-            <button className="btn danger" onClick={() => onDelete(atom.id)}>
+            <button className="btn danger" aria-label="Delete atom" onClick={() => onDelete(atom.id)}>
               ✕ <kbd>Del</kbd>
             </button>
           )}
@@ -236,8 +263,7 @@ function AtomDetails({ atom, graph, onPatch, onRotate, onDelete, onPinMolecule, 
 function FieldGuide() {
   return (
     <div className="guide">
-      <section className="card">
-        <h4>Bonding</h4>
+      <details className="card" open><summary>Bonding</summary><div className="guide-body">
         <div className="bond-rules">
           <div>
             <span className="glyph-tab" /> tab <i>→</i> <span className="glyph-slot" /> slot <b className="ok">bonds</b>
@@ -255,49 +281,44 @@ function FieldGuide() {
         <p className="muted small">
           Every atom is a hexagon with six edges. Pieces lock together like a jigsaw, and everything bonded is one rigid molecule that moves as a single body.
         </p>
-      </section>
+      </div></details>
 
-      <section className="card">
-        <h4>Signal</h4>
+      <details className="card"><summary>Signal</summary><div className="guide-body">
         <p className="small">
           Charge flows from tabs into slots. Conduit chains share charge instantly; each gate adds one tick of delay, so loops make clocks and memory.
         </p>
         <div className="signal-swatch">
           <i style={{ background: SIGNAL }} /> charged
         </div>
-      </section>
+      </div></details>
 
-      <section className="card">
-        <h4>Forces</h4>
+      <details className="card"><summary>Forces</summary><div className="guide-body">
         <p className="small">
           <b style={{ color: DEFS.magnetar.color }}>Magnetars</b> pull and <b style={{ color: DEFS.repulsar.color }}>Repulsars</b> push every other molecule in range. They never feel their own field, so an attractor and repeller in separate molecules chase each other forever.
         </p>
         <p className="muted small">
           <b>Heat</b> jostles small molecules and tumbles loose atoms into fitting orientations, which drives new reactions. Pinned atoms ignore it.
         </p>
-      </section>
+      </div></details>
 
-      <section className="card">
-        <h4>Life</h4>
+      <details className="card"><summary>Life</summary><div className="guide-body">
         <p className="small">
           <b style={{ color: DEFS.propulsor.color }}>Propulsors</b> move a molecule, <b style={{ color: DEFS.gyron.color }}>Gyrons</b> steer it,{' '}
           <b style={{ color: DEFS.oculus.color }}>Oculi</b> see, <b style={{ color: DEFS.devourer.color }}>Devourers</b> eat and{' '}
           <b style={{ color: DEFS.fabricator.color }}>Fabricators</b> copy. Wire them with logic and you have a creature.
         </p>
-      </section>
+      </div></details>
 
-      <section className="card">
-        <h4>Try building</h4>
+      <details className="card"><summary>Try building</summary><div className="guide-body">
         <ul className="rules">
           <li>A walker: Spark → Propulsor, with a Quanta pulsing a Gyron so it turns 60° at random.</li>
           <li>A hunter: an Oculus looking through a Devourer, wired to both the mouth and a Propulsor.</li>
           <li>A ripple counter: Mnemons chained through Negons, clocked by a Pulsar.</li>
           <li>A printer: a Pulsar clocking a Fabricator that holds the atom you want copied.</li>
         </ul>
-      </section>
+      </div></details>
 
-      <section className="card keys">
-        <h4>Controls</h4>
+      <details className="card keys"><summary>Controls</summary><div className="guide-body">
         <dl>
           <dt>Drag</dt>
           <dd>place / move atom</dd>
@@ -322,7 +343,7 @@ function FieldGuide() {
           <dt>Wheel · Drag bg</dt>
           <dd>zoom · pan</dd>
         </dl>
-      </section>
+      </div></details>
     </div>
   )
 }
