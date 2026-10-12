@@ -25,6 +25,7 @@ import {
   Graphics,
   GraphicsContext,
   GraphicsPath,
+  Matrix,
   Rectangle,
   RenderTexture,
   Sprite,
@@ -165,6 +166,13 @@ export class FieldRenderer {
   private ghostLayer = new Container()
   private uiLayer = new Container()
   private bakeStage = new Container()
+  /**
+   * One reusable bake target per resolution. Pixi caches a batch bind group
+   * for every texture it draws and never drops it, so destroying a fresh
+   * target after each bake would warn and leak one cache entry per bake.
+   */
+  private scratch = new Map<number, RenderTexture>()
+  private bakeOrigin = new Matrix().translate(BAKE, BAKE)
 
   private nodes = new Map<string, AtomNode>()
   private dying: { node: AtomNode; t: number }[] = []
@@ -503,7 +511,12 @@ export class FieldRenderer {
       bt.alpha = t.alpha ?? 1
       stage.addChild(bt)
     }
-    const scratch = this.app.renderer.generateTexture({ target: stage, frame: new Rectangle(-BAKE, -BAKE, BAKE * 2, BAKE * 2), resolution: res, antialias: true })
+    let scratch = this.scratch.get(res)
+    if (!scratch) {
+      scratch = RenderTexture.create({ width: BAKE * 2, height: BAKE * 2, resolution: res, antialias: true })
+      this.scratch.set(res, scratch)
+    }
+    this.app.renderer.render({ container: stage, target: scratch, transform: this.bakeOrigin, clearColor: [0, 0, 0, 0] })
     // Graphics built on shared contexts leave those contexts intact when destroyed.
     stage.removeChildren().forEach((c) => c.destroy())
 
@@ -519,7 +532,6 @@ export class FieldRenderer {
     this.pasteSprite.width = this.pasteSprite.height = size
     this.app.renderer.render({ container: this.paste, target: slot.page.rt, clear: false })
     this.pasteSprite.texture = Texture.EMPTY
-    scratch.destroy(true)
     return { tex: new Texture({ source: slot.page.rt.source, frame: new Rectangle(slot.x, slot.y, size, size) }), slot }
   }
 
